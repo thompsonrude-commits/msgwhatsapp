@@ -51,6 +51,8 @@ function App() {
   const isSendingRef = useRef(false)
   const logEndRef = useRef<HTMLDivElement>(null)
   const [contactStatuses, setContactStatuses] = useState<Record<string, 'pending' | 'sending' | 'sent' | 'failed'>>({})
+  const [feedEntries, setFeedEntries] = useState<Array<{phone: string, status: 'sent'|'failed'|'retry', message: string, time: Date}>>([])
+  const feedEndRef = useRef<HTMLDivElement>(null)
   const [license, setLicense] = useState<{ valid: boolean; trialExpired: boolean; hoursLeft: number; machineId: string } | null>(null)
   const [licenseKey, setLicenseKey] = useState('')
   const [licenseError, setLicenseError] = useState('')
@@ -451,11 +453,34 @@ function App() {
         setSimState('sending')
         await new Promise(r => setTimeout(r, 600))
 
-        await api.sendMessage({ phone: contact.phone, message: finalMessage, accountId: targetAccount.accountId })
+        // Retry up to 3 times on failure
+        let sendSuccess = false
+        let lastError: any = null
+        for (let attempt = 1; attempt <= 3; attempt++) {
+          try {
+            await api.sendMessage({ phone: contact.phone, message: finalMessage, accountId: targetAccount.accountId })
+            sendSuccess = true
+            break
+          } catch (sendErr: any) {
+            lastError = sendErr
+            const msg = sendErr?.message || ''
+            const isRateLimit = msg.includes('rate') || msg.includes('429') || msg.includes('Too Many') || msg.includes('r: r') || msg.includes('timeout')
+            if (attempt < 3) {
+              const waitMs = isRateLimit ? 60000 * attempt : 10000 * attempt
+              setSuccess(`Retry ${attempt}/3 for ${contact.phone} — waiting ${waitMs/1000}s...`)
+              setFeedEntries(prev => [{phone: String(contact.phone), status: 'retry' as const, message: `Retry ${attempt}: ${(lastError?.message||'').slice(0,50)}`, time: new Date()}, ...prev].slice(0,200))
+              await new Promise(r => setTimeout(r, waitMs))
+              if (!isSendingRef.current) break
+              setSuccess(null)
+            }
+          }
+        }
+
+        if (!sendSuccess) throw lastError
 
         accountSentCount[targetAccount.accountId] = (accountSentCount[targetAccount.accountId] || 0) + 1
         sentThisSession++
-
+        setFeedEntries(prev => [{phone: String(contact.phone), status: 'sent' as const, message: finalMessage.slice(0,60), time: new Date()}, ...prev].slice(0,200))
         setSimState('sent')
         await new Promise(r => setTimeout(r, 1500))
         setSimState('idle')
@@ -475,7 +500,9 @@ function App() {
       } catch (e: any) {
         console.error(e)
         setContactStatuses(prev => ({ ...prev, [contact.phone]: 'failed' }))
-        setError(`Failed: ${e?.message || 'Unknown error'}`)
+        const errMsg = e?.message || 'Unknown error'
+        setFeedEntries(prev => [{phone: String(contact.phone), status: 'failed' as const, message: errMsg.slice(0,80), time: new Date()}, ...prev].slice(0,200))
+        setError(`Failed: ${errMsg}`)
         await new Promise(r => setTimeout(r, 3000))
         setError(null)
       }
@@ -1118,18 +1145,21 @@ function App() {
           <div className="h-28 bg-white border-t mt-auto flex flex-col overflow-hidden shrink-0 shadow-md">
              <div className="px-2 py-0.5 border-b bg-[#F0F2F5]/50 flex items-center justify-between shrink-0 font-black text-[7px] text-gray-400 tracking-widest uppercase">
                 <span>FEED</span>
-                <button onClick={async () => { await (window as any).api.clearLogs(); loadData(); }} className="text-red-400 scale-90">X</button>
+                <button onClick={() => setFeedEntries([])} className="text-red-400 scale-90">X</button>
              </div>
-             <div className="flex-1 overflow-y-auto p-1.5 space-y-1 bg-[#F8F9FA] custom-scroll">
-                {logs.map((log: any, i: number) => (
+             <div className="flex-1 overflow-y-auto p-1.5 space-y-0.5 bg-[#F8F9FA] custom-scroll">
+                {feedEntries.length === 0 && <p className="text-[7px] text-gray-300 text-center pt-2 font-black uppercase">Send activity will appear here</p>}
+                {feedEntries.map((entry, i) => (
                    <div key={i} className="flex items-center gap-1.5 border-b border-black/[0.02] pb-0.5 last:border-0 text-[8px] font-bold">
-                      <span className="text-gray-300 flex-shrink-0 font-mono text-[7px]">{new Date(log.timestamp).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}</span>
-                      <span className="text-[#128C7E] flex-shrink-0">+{log.phone}</span>
-                      <span className="text-gray-400 italic truncate flex-1">&ldquo;{log.message || '...'}&rdquo;</span>
-                      <span className={`${log.status === 'sent' ? 'text-[#00A884]' : 'text-red-500'} flex-shrink-0 text-[7px]`}>{log.status === 'sent' ? 'OK' : 'FAIL'}</span>
+                      <span className="text-gray-300 flex-shrink-0 font-mono text-[7px]">{entry.time.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}</span>
+                      <span className="text-[#128C7E] flex-shrink-0">+{entry.phone}</span>
+                      <span className="text-gray-400 italic truncate flex-1">{entry.message}</span>
+                      <span className={`flex-shrink-0 text-[7px] font-black ${entry.status === 'sent' ? 'text-[#00A884]' : entry.status === 'retry' ? 'text-orange-400' : 'text-red-500'}`}>
+                        {entry.status === 'sent' ? '✓ OK' : entry.status === 'retry' ? '↻ RETRY' : '✗ FAIL'}
+                      </span>
                    </div>
                 ))}
-                <div ref={logEndRef} />
+                <div ref={feedEndRef} />
              </div>
           </div>
         </div>
