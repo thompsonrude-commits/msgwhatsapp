@@ -413,9 +413,14 @@ function App() {
     for (const contact of contacts) {
       if (!isSendingRef.current) break;
 
-      // Get current ready accounts
+      // Get current ready accounts — skip any that are no longer connected
       const currentReady = readyAccounts()
-      if (currentReady.length === 0) { setError('All accounts disconnected'); break }
+      if (currentReady.length === 0) {
+        setError('All accounts disconnected — campaign paused')
+        setIsSending(false)
+        isSendingRef.current = false
+        break
+      }
 
       // Find an account that hasn't hit daily limit
       let targetAccount: any = null
@@ -463,8 +468,12 @@ function App() {
             break
           } catch (sendErr: any) {
             lastError = sendErr
-            const msg = sendErr?.message || ''
-            const isRateLimit = msg.includes('rate') || msg.includes('429') || msg.includes('Too Many') || msg.includes('r: r') || msg.includes('timeout')
+            const msg = (sendErr?.message || '').toLowerCase()
+            // If account disconnected — no point retrying, skip immediately
+            if (msg.includes('not ready') || msg.includes('disconnected') || msg.includes('session')) {
+              break
+            }
+            const isRateLimit = msg.includes('rate') || msg.includes('429') || msg.includes('too many') || msg.includes('erro') || msg.includes('timeout')
             if (attempt < 3) {
               const waitMs = isRateLimit ? 60000 * attempt : 10000 * attempt
               setSuccess(`Retry ${attempt}/3 for ${contact.phone} — waiting ${waitMs/1000}s...`)
@@ -472,6 +481,10 @@ function App() {
               await new Promise(r => setTimeout(r, waitMs))
               if (!isSendingRef.current) break
               setSuccess(null)
+              // Refresh account status before retrying
+              await loadAccounts()
+              const stillReady = readyAccounts().find((a: any) => a.accountId === targetAccount.accountId)
+              if (!stillReady) break // account went offline, skip
             }
           }
         }
