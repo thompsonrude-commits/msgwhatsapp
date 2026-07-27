@@ -14,7 +14,7 @@ import {
   Smartphone,
   RefreshCw
 } from 'lucide-react'
-import { twistMessage } from './utils/twister'
+import { twistMessage, getTypingJitter } from './utils/twister'
 
 const AppLogo = () => (
   <div className="flex items-center gap-1">
@@ -413,13 +413,23 @@ function App() {
     for (const contact of contacts) {
       if (!isSendingRef.current) break;
 
-      // Get current ready accounts — skip any that are no longer connected
-      const currentReady = readyAccounts()
+      // Get current ready accounts — wait for reconnect instead of stopping
+      let currentReady = readyAccounts()
       if (currentReady.length === 0) {
-        setError('All accounts disconnected — campaign paused')
-        setIsSending(false)
-        isSendingRef.current = false
-        break
+        setSuccess('Accounts reconnecting — waiting up to 60s...')
+        for (let w = 0; w < 12; w++) {
+          await new Promise(r => setTimeout(r, 5000))
+          await loadAccounts()
+          currentReady = readyAccounts()
+          if (currentReady.length > 0) { setSuccess(null); break }
+          if (!isSendingRef.current) break
+        }
+        if (currentReady.length === 0) {
+          setError('All accounts disconnected — campaign paused')
+          setIsSending(false)
+          isSendingRef.current = false
+          break
+        }
       }
 
       // Find an account that hasn't hit daily limit
@@ -448,7 +458,7 @@ function App() {
         setSimPhone(`${contact.phone} [${targetAccount.label || targetAccount.accountId}]`)
         setSimState('typing')
         setSimTypedText('')
-        const tMs = Math.min(Math.max(finalMessage.length * 40, 1500), 6000)
+        const tMs = getTypingJitter(finalMessage.length)
         const cMs = tMs / finalMessage.length
         for (let ci = 0; ci <= finalMessage.length; ci++) {
           if (!isSendingRef.current) break

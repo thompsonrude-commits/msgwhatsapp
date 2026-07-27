@@ -200,6 +200,19 @@ export class WhatsAppAccount extends EventEmitter {
       this.isAuthenticated = false
       this.isInitializing = false
       this.emit('disconnected', this.accountId, reason)
+
+      // Auto-reconnect unless explicitly logged out
+      if (reason !== 'LOGOUT' && !String(reason).includes('replaced')) {
+        const delayMs = 15000 + Math.random() * 20000 // 15-35s jitter
+        console.log(`[${this.accountId}] Disconnected (${reason}), reconnecting in ${Math.round(delayMs/1000)}s...`)
+        setTimeout(async () => {
+          try {
+            await this.client.destroy()
+          } catch (_) {}
+          this.createClient()
+          setTimeout(() => this.initialize(), 2000)
+        }, delayMs)
+      }
     })
     // Auto-blacklist on STOP/unsubscribe keywords
     this.client.on('message', (msg) => {
