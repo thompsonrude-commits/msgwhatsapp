@@ -102,6 +102,11 @@ function createTables() {
     keyword TEXT,
     timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
   )`)
+
+  db.run(`CREATE TABLE IF NOT EXISTS kv (
+    key TEXT PRIMARY KEY,
+    value TEXT
+  )`)
 }
 
 function runMigrations() {
@@ -309,7 +314,32 @@ export function deleteTemplate(id: number) {
   saveDatabase()
 }
 
-// ── Unsubscribes ──────────────────────────────────────────────────────────────
+// ── Replies / Contact replies tracking ────────────────────────────────────────
+export function markContactReplied(phone: string) {
+  db.run("UPDATE contacts SET status = 'replied' WHERE phone = ?", [phone])
+  saveDatabase()
+}
+
+export function getContactFailCount(phone: string): number {
+  const res = toRows(db.exec("SELECT COUNT(*) as c FROM logs WHERE phone = ? AND status = 'failed'", [phone]))
+  return res[0]?.c || 0
+}
+
+// ── WA Version cache ──────────────────────────────────────────────────────────
+export function getWaVersion(): string | null {
+  try {
+    const res = toRows(db.exec("SELECT value FROM kv WHERE key = 'wa_version'"))
+    return res[0]?.value || null
+  } catch { return null }
+}
+
+export function setWaVersion(version: string) {
+  try {
+    db.run("INSERT OR REPLACE INTO kv (key, value) VALUES ('wa_version', ?)", [version])
+    saveDatabase()
+  } catch (_) {}
+}
+
 export function addUnsubscribe(phone: string, accountId: string, keyword: string) {
   db.run('INSERT OR IGNORE INTO unsubscribes (phone, account_id, keyword) VALUES (?, ?, ?)',
     [phone, accountId, keyword])

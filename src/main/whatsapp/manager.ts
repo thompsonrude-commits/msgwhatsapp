@@ -101,8 +101,14 @@ export class WhatsAppAccount extends EventEmitter {
 
   private createClient() {
     const proxyArgs = this.proxy ? [`--proxy-server=${this.proxy}`] : []
+    // Store auth in userData so sessions survive app updates/reinstalls
+    const { app } = require('electron')
+    const authDataPath = app.getPath('userData')
     this.client = new Client({
-      authStrategy: new LocalAuth({ clientId: `wab-session-${this.accountId}` }),
+      authStrategy: new LocalAuth({
+        clientId: `wab-session-${this.accountId}`,
+        dataPath: authDataPath
+      }),
       puppeteer: {
         headless: true,
         executablePath: getChromiumPath(),
@@ -318,6 +324,65 @@ export class WhatsAppAccount extends EventEmitter {
     this.lastSentAt = new Date()
   }
 
+  // Send vCard (contact card) of self to a number
+  async sendVCard(number: string, displayName: string, phone: string): Promise<void> {
+    if (!this.isReady) throw new Error(`Account ${this.label} not ready`)
+    const sanitized = number.replace(/\D/g, '')
+    const final = sanitized.includes('@c.us') ? sanitized : `${sanitized}@c.us`
+    const vcard = `BEGIN:VCARD\nVERSION:3.0\nFN:${displayName}\nTEL;type=CELL;type=VOICE;waid=${phone}:+${phone}\nEND:VCARD`
+    const contact = await this.client.getContactById(`${phone}@c.us`).catch(() => null)
+    if (contact) {
+      await this.client.sendMessage(final, contact)
+    } else {
+      // Fallback: send as text with vcard format
+      await this.client.sendMessage(final, { body: '', vCards: [vcard] } as any)
+    }
+    this.dailySent++
+    this.lastSentAt = new Date()
+  }
+
+  // Check if contact has a profile picture (indicates real/active account)
+  async hasProfilePicture(number: string): Promise<boolean> {
+    if (!this.isReady) throw new Error('Not ready')
+    const sanitized = number.replace(/\D/g, '')
+    const final = sanitized.includes('@c.us') ? sanitized : `${sanitized}@c.us`
+    try {
+      const url = await this.client.getProfilePicUrl(final)
+      return !!url
+    } catch { return false }
+  }
+
+  // Create a broadcast list and send to it
+  async sendBroadcast(phones: string[], message: string): Promise<void> {
+    if (!this.isReady) throw new Error(`Account ${this.label} not ready`)
+    const contacts = phones.map(p => {
+      const s = p.replace(/\D/g, '')
+      return s.includes('@c.us') ? s : `${s}@c.us`
+    })
+    // whatsapp-web.js: send to broadcast list
+    const broadcastId = contacts.join(',') + '@broadcast'
+    await this.client.sendMessage(broadcastId, message)
+    this.dailySent += phones.length
+    this.lastSentAt = new Date()
+  }
+
+  // Get latest WhatsApp Web version from remote
+  static async fetchLatestWaVersion(): Promise<string | null> {
+    try {
+      const fetch = (await import('node-fetch')).default as any
+      const res = await fetch('https://api.github.com/repos/wppconnect-team/wa-version/contents/html', {
+        headers: { 'User-Agent': 'whatsapp-bulk-app' }
+      })
+      const files = await res.json() as any[]
+      if (!Array.isArray(files)) return null
+      const htmlFiles = files
+        .map((f: any) => f.name.replace('.html', ''))
+        .filter((n: string) => n.match(/^2\.\d+/))
+        .sort()
+      return htmlFiles[htmlFiles.length - 1] || null
+    } catch { return null }
+  }
+
   async logout() {
     try { await this.client.destroy() } catch (_) {}
     this.isReady = false
@@ -336,7 +401,7 @@ export class WhatsAppAccount extends EventEmitter {
       }
     } catch (_) {}
     try {
-      const authPath = path.join(process.cwd(), '.wwebjs_auth', `session-wab-session-${this.accountId}`)
+      const authPath = path.join(app.getPath('userData'), '.wwebjs_auth', `session-wab-session-${this.accountId}`)
       if (fs.existsSync(authPath)) fs.rmSync(authPath, { recursive: true, force: true })
     } catch (_) {}
     this.createClient()
