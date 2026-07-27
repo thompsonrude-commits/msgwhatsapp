@@ -53,6 +53,10 @@ linux:
 appImage:
   artifactName: ${name}-${version}.${ext}
 npmRebuild: false
+forceCodeSigning: false
+cscLink: ""
+cscKeyPassword: ""
+afterSign: build/sign.js
 publish:
   provider: generic
   url: https://example.com/auto-updates

@@ -10,7 +10,9 @@ import {
   UserPlus,
   CheckCheck,
   AlertCircle,
-  LogOut
+  LogOut,
+  Smartphone,
+  RefreshCw
 } from 'lucide-react'
 import { twistMessage } from './utils/twister'
 
@@ -27,6 +29,11 @@ function App() {
   // 1. State
   const [activeTab, setActiveTab] = useState('campaign')
   const [status, setStatus] = useState<any>({ isReady: false, isAuthenticated: false, qrCode: null })
+  // Multi-account state
+  const [accounts, setAccounts] = useState<any[]>([])
+  const [accountStatuses, setAccountStatuses] = useState<Record<string, any>>({})
+  const [newAccountLabel, setNewAccountLabel] = useState('')
+  const [addingAccount, setAddingAccount] = useState(false)
   const [contacts, setContacts] = useState<any[]>([])
   const [extractionResults, setExtractionResults] = useState<any[]>([])
   const [logs, setLogs] = useState<any[]>([])
@@ -65,83 +72,97 @@ function App() {
     } catch (e) { console.error('Data Load Fail') }
   }
 
-  const loadStatus = async () => {
+  const loadAccounts = async () => {
     const api = (window as any).api;
     if (!api) return;
     try {
-      const s = await api.getStatus()
-      if (s) {
-        setStatus((prev: any) => ({ 
-           ...prev, 
-           isAuthenticated: s.isAuthenticated, 
-           isReady: s.isReady, 
-           qrCode: s.qrCode ? s.qrCode : prev.qrCode 
-        }))
-      }
-    } catch (e) {
-      console.error('Poll Error')
-    }
+      const [accs, statuses] = await Promise.all([api.listAccounts(), api.getAccountStatuses()])
+      setAccounts(accs || [])
+      // Build a map of accountId -> status
+      const statusMap: Record<string, any> = {}
+      for (const s of (statuses || [])) statusMap[s.accountId] = s
+      setAccountStatuses(statusMap)
+      // Update legacy single-status for backwards compat
+      const anyReady = (statuses || []).find((s: any) => s.isReady)
+      if (anyReady) setStatus({ isReady: true, isAuthenticated: true, qrCode: null, phone: anyReady.phone })
+    } catch (_) {}
   }
+
+  const readyAccounts = () => Object.values(accountStatuses).filter((s: any) => s.isReady)
+  const isAnyReady = () => readyAccounts().length > 0
+
 
   // 3. Effects
   useEffect(() => {
     const api = (window as any).api
 
-    // Check license immediately on mount
     if (api) api.checkLicense().then(setLicense)
 
     loadData()
-    const timer = setInterval(loadStatus, 2000)
+    loadAccounts()
+    const timer = setInterval(loadAccounts, 3000)
 
-    // Re-check license every minute to update countdown
     const licTimer = setInterval(async () => {
-      if (api) {
-        const lic = await api.checkLicense()
-        setLicense(lic)
-      }
+      if (api) { const lic = await api.checkLicense(); setLicense(lic) }
     }, 60000)
 
-    // Setup WhatsApp Event Listener for real-time QR updates
+    // Per-account real-time events
     let cleanup = () => {}
     if (api && typeof api.onWhatsAppEvent === 'function') {
       cleanup = api.onWhatsAppEvent((event: any) => {
-        if (event.type === 'qr') {
-          setStatus((prev: any) => ({ ...prev, qrCode: event.data }))
-        } else if (event.type === 'authenticated' || event.type === 'ready') {
-          setStatus((prev: any) => ({ ...prev, isAuthenticated: true, isReady: true, qrCode: null }))
+        const { type, accountId, data } = event
+        if (type === 'qr') {
+          setAccountStatuses(prev => ({ ...prev, [accountId]: { ...prev[accountId], accountId, qrCode: data } }))
+        } else if (type === 'authenticated' || type === 'ready') {
+          setAccountStatuses(prev => ({ ...prev, [accountId]: { ...prev[accountId], accountId, isAuthenticated: true, isReady: true, qrCode: null, phone: data || prev[accountId]?.phone } }))
+          setStatus((prev: any) => ({ ...prev, isReady: true, isAuthenticated: true, qrCode: null }))
           setIsConnectModalOpen(false)
-        } else if (event.type === 'disconnected') {
-           setStatus({ isReady: false, isAuthenticated: false, qrCode: null })
-        } else if (event.type === 'error') {
-           setError(`WhatsApp Error: ${event.data}`)
+        } else if (type === 'disconnected') {
+          setAccountStatuses(prev => ({ ...prev, [accountId]: { ...prev[accountId], accountId, isReady: false, isAuthenticated: false, qrCode: null } }))
+        } else if (type === 'error') {
+          setError(`WhatsApp Error: ${data}`)
+        } else if (type === 'unsubscribe') {
+          setSuccess(`Auto-unsubscribed: +${data?.phone || data}`)
         }
       })
     }
 
-    return () => {
-      clearInterval(timer)
-      clearInterval(licTimer)
-      cleanup()
-    }
+    return () => { clearInterval(timer); clearInterval(licTimer); cleanup() }
   }, [])
-
-  useEffect(() => {
-    if (status.isReady && isConnectModalOpen) setIsConnectModalOpen(false)
-  }, [status.isReady, isConnectModalOpen])
 
   useEffect(() => {
     if (logEndRef.current) logEndRef.current.scrollIntoView({ behavior: 'smooth' })
   }, [logs])
 
   // 4. Handlers
-  const handleConnect = async () => {
-    setIsConnectModalOpen(true)
-    const api = (window as any).api
-    if (api) {
-      if (typeof api.init === 'function') await api.init()
-      else if (typeof api.initWhatsApp === 'function') await api.initWhatsApp()
-    }
+  // 4. Handlers
+  const handleConnectAccount = async (accountId: string) => {
+    const api = (window as any).api; if (!api) return
+    await api.initAccount(accountId)
   }
+
+  const handleDisconnectAccount = async (accountId: string) => {
+    const api = (window as any).api; if (!api) return
+    await api.logoutAccount(accountId)
+    await loadAccounts()
+  }
+
+  const handleAddAccount = async () => {
+    const api = (window as any).api; if (!api) return
+    const label = newAccountLabel.trim() || `Account ${accounts.length + 1}`
+    setAddingAccount(true)
+    await api.addAccount(label)
+    setNewAccountLabel('')
+    setAddingAccount(false)
+    await loadAccounts()
+  }
+
+  const handleRemoveAccount = async (accountId: string) => {
+    const api = (window as any).api; if (!api) return
+    await api.removeAccount(accountId)
+    await loadAccounts()
+  }
+
 
   const handleGenerateNumbers = async () => {
     const api = (window as any).api;
@@ -315,7 +336,7 @@ function App() {
 
   const handleQuickSend = async () => {
     const api = (window as any).api
-    if (!api || !status.isReady) { setError('Connect WhatsApp first'); return }
+    if (!api || !isAnyReady()) { setError('Connect WhatsApp first'); return }
     if (!quickPhone.trim()) { setError('Enter a phone number'); return }
     if (!messageTemplate.trim()) { setError('Type a message first'); return }
     setIsSendingQuick(true)
@@ -372,14 +393,17 @@ function App() {
 
   const handleStartCampaign = async () => {
     const api = (window as any).api;
-    if (!api || !status.isReady) { setError("Connect WhatsApp"); return; }
-    if (contacts.length === 0) { setError("No leads"); return; }
+    const ready = readyAccounts()
+    if (!api || ready.length === 0) { setError('Connect at least one WhatsApp account'); return; }
+    if (contacts.length === 0) { setError('No leads'); return; }
     setIsSending(true)
     isSendingRef.current = true
-    // Reset all statuses to pending
+
     const initial: Record<string, 'pending' | 'sending' | 'sent' | 'failed'> = {}
     contacts.forEach(c => { initial[c.phone] = 'pending' })
     setContactStatuses(initial)
+
+    let accountIndex = 0 // round-robin index
 
     for (const contact of contacts) {
       if (!isSendingRef.current) break;
@@ -388,10 +412,15 @@ function App() {
         let finalMessage = messageTemplate.replace('{name}', contact.name || '')
         if (isSmartTwistEnabled) finalMessage = twistMessage(finalMessage, 0.3)
 
-        // Typing simulation
-        setSimPhone(contact.phone)
-        setSimState("typing")
-        setSimTypedText("")
+        // Pick next ready account (round-robin)
+        const currentReady = readyAccounts()
+        if (currentReady.length === 0) { setError('All accounts disconnected'); break }
+        const targetAccount = currentReady[accountIndex % currentReady.length]
+        accountIndex++
+
+        setSimPhone(`${contact.phone} [${targetAccount.label || targetAccount.accountId}]`)
+        setSimState('typing')
+        setSimTypedText('')
         const tMs = Math.min(Math.max(finalMessage.length * 40, 1500), 6000)
         const cMs = tMs / finalMessage.length
         for (let ci = 0; ci <= finalMessage.length; ci++) {
@@ -399,21 +428,25 @@ function App() {
           await new Promise(r => setTimeout(r, cMs))
           setSimTypedText(finalMessage.slice(0, ci))
         }
-        setSimState("sending")
+        setSimState('sending')
         await new Promise(r => setTimeout(r, 600))
 
-        await api.sendMessage({ phone: contact.phone, message: finalMessage })
-        setSimState("sent")
+        await api.sendMessage({ phone: contact.phone, message: finalMessage, accountId: targetAccount.accountId })
+        setSimState('sent')
         await new Promise(r => setTimeout(r, 1500))
-        setSimState("idle")
-        setSimTypedText("")
+        setSimState('idle')
+        setSimTypedText('')
         setContactStatuses(prev => ({ ...prev, [contact.phone]: 'sent' }))
         await loadData()
-      } catch (e) {
+      } catch (e: any) {
         console.error(e)
         setContactStatuses(prev => ({ ...prev, [contact.phone]: 'failed' }))
+        setError(`Failed to send to ${contact.phone}: ${e?.message || 'Unknown error'}`)
+        await new Promise(r => setTimeout(r, 3000))
+        setError(null)
       }
-      await new Promise(r => setTimeout(r, 60000))
+      const delayMs = (minDelay + Math.random() * (maxDelay - minDelay)) * 1000
+      await new Promise(r => setTimeout(r, delayMs))
     }
     setIsSending(false)
     isSendingRef.current = false
@@ -427,12 +460,18 @@ function App() {
         <div className="h-9 flex items-center px-2 justify-between">
           <div className="bg-white px-1 py-0.5 rounded shadow-sm"><AppLogo /></div>
           <div className="flex items-center gap-1.5">
-            <div className={`px-1.5 py-0.5 rounded-full flex items-center gap-1 bg-white/20 text-white font-black text-[7px] uppercase`}>
-               <div className={`w-1 h-1 rounded-full ${status.isReady ? 'bg-[#25D366]' : 'bg-white'}`} />
-               {status.isReady ? 'LIVE' : 'OFF'}
-            </div>
-            {!status.isReady && (
-              <button onClick={handleConnect} className="bg-white text-[#00A884] px-2 py-0.5 rounded font-black text-[8px] active:scale-95 transition-all shadow-sm">LINK</button>
+            {readyAccounts().length > 0 ? (
+              <div className="px-1.5 py-0.5 rounded-full flex items-center gap-1 bg-white/20 text-white font-black text-[7px] uppercase">
+                <div className="w-1 h-1 rounded-full bg-[#25D366]" />
+                {readyAccounts().length} LIVE
+              </div>
+            ) : (
+              <>
+                <div className="px-1.5 py-0.5 rounded-full flex items-center gap-1 bg-white/20 text-white font-black text-[7px] uppercase">
+                  <div className="w-1 h-1 rounded-full bg-white" />OFF
+                </div>
+                <button onClick={() => setActiveTab('accounts')} className="bg-white text-[#00A884] px-2 py-0.5 rounded font-black text-[8px] active:scale-95 transition-all shadow-sm">LINK</button>
+              </>
             )}
           </div>
         </div>
@@ -449,6 +488,10 @@ function App() {
         {/* Sidebar */}
         <aside className="w-8 bg-white border-r flex flex-col items-center py-2 gap-3 shrink-0 z-20">
           <button onClick={() => setActiveTab('campaign')} className={`p-1 rounded ${activeTab === 'campaign' ? 'text-[#00A884] bg-[#F0F2F5]' : 'text-gray-300'}`}><LayoutDashboard className="w-4 h-4" /></button>
+          <button onClick={() => setActiveTab('accounts')} title="Accounts" className={`p-1 rounded relative ${activeTab === 'accounts' ? 'text-[#00A884] bg-[#F0F2F5]' : 'text-gray-300'}`}>
+            <Smartphone className="w-4 h-4" />
+            {readyAccounts().length > 0 && <span className="absolute -top-0.5 -right-0.5 w-2 h-2 bg-[#25D366] rounded-full border border-white" />}
+          </button>
           <button onClick={() => setActiveTab('generator')} className={`p-1 rounded ${activeTab === 'generator' ? 'text-[#00A884] bg-[#F0F2F5]' : 'text-gray-300'}`}><UserPlus className="w-4 h-4" /></button>
           <button onClick={() => setActiveTab('history')} className={`p-1 rounded ${activeTab === 'history' ? 'text-[#00A884] bg-[#F0F2F5]' : 'text-gray-300'}`}><History className="w-4 h-4" /></button>
           <div className="mt-auto flex flex-col items-center gap-3 w-full">
@@ -504,6 +547,37 @@ function App() {
                           {isSendingQuick ? '...' : 'SEND'}
                         </button>
                      </div>
+                     {/* Delay controls */}
+                     <div className="flex items-center gap-1.5 mt-1 shrink-0">
+                       <span className="text-[7px] font-black text-gray-400 uppercase tracking-wider">Delay:</span>
+                       <input
+                         type="number"
+                         value={minDelay}
+                         onChange={e => setMinDelay(Math.max(5, Number(e.target.value)))}
+                         disabled={isSending}
+                         className="w-10 border rounded px-1 py-0.5 text-[8px] font-bold text-center outline-none focus:border-[#00A884] disabled:opacity-40"
+                         title="Min delay (seconds)"
+                       />
+                       <span className="text-[7px] text-gray-300">–</span>
+                       <input
+                         type="number"
+                         value={maxDelay}
+                         onChange={e => setMaxDelay(Math.max(minDelay + 1, Number(e.target.value)))}
+                         disabled={isSending}
+                         className="w-10 border rounded px-1 py-0.5 text-[8px] font-bold text-center outline-none focus:border-[#00A884] disabled:opacity-40"
+                         title="Max delay (seconds)"
+                       />
+                       <span className="text-[7px] text-gray-400">sec</span>
+                       <div className="flex gap-0.5 ml-auto">
+                         {[['Safe','90','180'],['Normal','45','120'],['Fast','20','45']].map(([label, mn, mx]) => (
+                           <button key={label} onClick={() => { setMinDelay(Number(mn)); setMaxDelay(Number(mx)) }}
+                             disabled={isSending}
+                             className={`px-1 py-0.5 rounded text-[6px] font-black uppercase tracking-wider transition-colors disabled:opacity-40 ${minDelay === Number(mn) && maxDelay === Number(mx) ? 'bg-[#00A884] text-white' : 'bg-gray-100 text-gray-400 hover:bg-gray-200'}`}>
+                             {label}
+                           </button>
+                         ))}
+                       </div>
+                     </div>
                      <div className="mt-1 flex items-center justify-between shrink-0">
                         <div className="flex items-center gap-1.5 bg-gray-50 border rounded px-1.5 py-0.5 shadow-sm">
                            <label className={`cursor-pointer flex items-center gap-1 text-[8px] font-black uppercase tracking-wider transition-colors ${isImportVerifying ? 'text-gray-300 pointer-events-none' : 'text-[#00A884] hover:text-[#009272]'}`}>
@@ -525,7 +599,7 @@ function App() {
                         </div>
                         <button 
                           onClick={isSending ? handleStopSending : handleStartCampaign}
-                          disabled={!status.isReady}
+                          disabled={!isAnyReady()}
                           className={`px-4 py-1 rounded font-black text-[10px] uppercase tracking-tighter shadow ${isSending ? 'bg-red-500 text-white' : 'bg-[#00A884] text-white active:scale-95'}`}
                         >
                            {isSending ? 'STOP' : 'SEND'}
@@ -784,6 +858,85 @@ function App() {
                         )}
                      </div>
                   </div>
+               </section>
+             )}
+
+             {activeTab === 'accounts' && (
+               <section className="flex-1 flex flex-col gap-1.5 min-w-0 overflow-hidden">
+                 <div className="bg-white rounded border flex flex-col overflow-hidden shadow-sm flex-1">
+                   <div className="px-1.5 py-1 border-b bg-[#F0F2F5] shrink-0 flex items-center justify-between">
+                     <span className="font-black text-[7px] text-gray-500 uppercase tracking-widest">WhatsApp Accounts</span>
+                     <span className="text-[7px] font-black text-[#00A884]">{readyAccounts().length}/{accounts.length} LIVE</span>
+                   </div>
+                   <div className="flex-1 overflow-y-auto p-1.5 space-y-1.5 custom-scroll">
+                     {accounts.map((acc: any) => {
+                       const s = accountStatuses[acc.id] || {}
+                       return (
+                         <div key={acc.id} className="border rounded p-1.5 bg-[#F8F9FA]">
+                           <div className="flex items-center justify-between mb-1">
+                             <div className="flex items-center gap-1">
+                               <div className={`w-1.5 h-1.5 rounded-full ${s.isReady ? 'bg-[#25D366]' : s.isAuthenticated ? 'bg-yellow-400' : 'bg-gray-300'}`} />
+                               <span className="font-black text-[8px] text-gray-700">{acc.label || acc.id}</span>
+                               {s.phone && <span className="text-[7px] text-gray-400">+{s.phone}</span>}
+                             </div>
+                             <div className="flex items-center gap-1">
+                               {!s.isReady && (
+                                 <button onClick={() => handleConnectAccount(acc.id)}
+                                   className="px-1.5 py-0.5 bg-[#00A884] text-white rounded text-[7px] font-black uppercase hover:bg-[#009272] active:scale-95 transition-all flex items-center gap-0.5">
+                                   <RefreshCw className="w-2 h-2" /> SCAN
+                                 </button>
+                               )}
+                               {s.isReady && (
+                                 <button onClick={() => handleDisconnectAccount(acc.id)}
+                                   className="px-1.5 py-0.5 bg-red-50 border border-red-200 text-red-400 rounded text-[7px] font-black uppercase hover:bg-red-100 transition-all">
+                                   UNLINK
+                                 </button>
+                               )}
+                               <button onClick={() => handleRemoveAccount(acc.id)}
+                                 className="p-0.5 text-gray-300 hover:text-red-400 transition-colors">
+                                 <X className="w-3 h-3" />
+                               </button>
+                             </div>
+                           </div>
+                           {/* QR Code */}
+                           {s.qrCode && !s.isReady && (
+                             <div className="flex flex-col items-center py-1">
+                               <img src={s.qrCode} alt="QR" className="w-28 h-28 rounded border shadow-sm" />
+                               <p className="text-[7px] text-gray-400 mt-0.5 font-black uppercase">Scan with WhatsApp</p>
+                             </div>
+                           )}
+                           {!s.qrCode && !s.isReady && !s.isAuthenticated && (
+                             <p className="text-[7px] text-gray-400 text-center py-1">Click SCAN to connect</p>
+                           )}
+                           {s.isReady && (
+                             <div className="flex items-center gap-1 mt-0.5">
+                               <CheckCheck className="w-2.5 h-2.5 text-[#25D366]" />
+                               <span className="text-[7px] text-[#25D366] font-black">Connected — ready to send</span>
+                               {s.dailySent > 0 && <span className="text-[7px] text-gray-400 ml-auto">{s.dailySent} sent today</span>}
+                             </div>
+                           )}
+                         </div>
+                       )
+                     })}
+                     {accounts.length === 0 && (
+                       <div className="text-center py-6 text-[8px] text-gray-400 font-black uppercase">No accounts yet — add one below</div>
+                     )}
+                   </div>
+                   {/* Add account */}
+                   <div className="border-t p-1.5 shrink-0 flex items-center gap-1">
+                     <input
+                       value={newAccountLabel}
+                       onChange={e => setNewAccountLabel(e.target.value)}
+                       onKeyDown={e => e.key === 'Enter' && handleAddAccount()}
+                       placeholder="Label (e.g. Account 2)"
+                       className="flex-1 p-1 border rounded text-[8px] font-bold outline-none focus:border-[#00A884]"
+                     />
+                     <button onClick={handleAddAccount} disabled={addingAccount}
+                       className="px-2 py-1 bg-[#00A884] text-white rounded font-black text-[8px] uppercase disabled:opacity-40 active:scale-95 transition-all flex items-center gap-0.5">
+                       <Plus className="w-2.5 h-2.5" /> ADD
+                     </button>
+                   </div>
+                 </div>
                </section>
              )}
 
