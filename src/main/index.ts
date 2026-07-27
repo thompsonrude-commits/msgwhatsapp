@@ -95,6 +95,10 @@ if (!isLock) {
       db.deleteAccount(accountId)
     })
 
+    ipcMain.handle('account:set-proxy', (_e, { accountId, proxy }) => {
+      whatsappManager.setAccountProxy(accountId, proxy || null)
+    })
+
     ipcMain.handle('account:update-limit', (_e, { accountId, limit }) => {
       db.updateAccountDailyLimit(accountId, limit)
     })

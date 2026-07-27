@@ -403,20 +403,40 @@ function App() {
     contacts.forEach(c => { initial[c.phone] = 'pending' })
     setContactStatuses(initial)
 
-    let accountIndex = 0 // round-robin index
+    let accountIndex = 0
+    let sentThisSession = 0
+    // Track per-account daily sent counts locally
+    const accountSentCount: Record<string, number> = {}
 
     for (const contact of contacts) {
       if (!isSendingRef.current) break;
+
+      // Get current ready accounts
+      const currentReady = readyAccounts()
+      if (currentReady.length === 0) { setError('All accounts disconnected'); break }
+
+      // Find an account that hasn't hit daily limit
+      let targetAccount: any = null
+      for (let attempt = 0; attempt < currentReady.length; attempt++) {
+        const candidate = currentReady[accountIndex % currentReady.length]
+        accountIndex++
+        const sent = accountSentCount[candidate.accountId] || candidate.dailySent || 0
+        if (sent < dailyLimit) {
+          targetAccount = candidate
+          break
+        }
+      }
+
+      // All accounts hit daily limit
+      if (!targetAccount) {
+        setSuccess('Daily limit reached for all accounts. Pausing until tomorrow...')
+        break
+      }
+
       setContactStatuses(prev => ({ ...prev, [contact.phone]: 'sending' }))
       try {
         let finalMessage = messageTemplate.replace('{name}', contact.name || '')
-        if (isSmartTwistEnabled) finalMessage = twistMessage(finalMessage, 0.3)
-
-        // Pick next ready account (round-robin)
-        const currentReady = readyAccounts()
-        if (currentReady.length === 0) { setError('All accounts disconnected'); break }
-        const targetAccount = currentReady[accountIndex % currentReady.length]
-        accountIndex++
+        if (isSmartTwistEnabled) finalMessage = twistMessage(finalMessage, 0.35)
 
         setSimPhone(`${contact.phone} [${targetAccount.label || targetAccount.accountId}]`)
         setSimState('typing')
@@ -432,24 +452,46 @@ function App() {
         await new Promise(r => setTimeout(r, 600))
 
         await api.sendMessage({ phone: contact.phone, message: finalMessage, accountId: targetAccount.accountId })
+
+        accountSentCount[targetAccount.accountId] = (accountSentCount[targetAccount.accountId] || 0) + 1
+        sentThisSession++
+
         setSimState('sent')
         await new Promise(r => setTimeout(r, 1500))
         setSimState('idle')
         setSimTypedText('')
         setContactStatuses(prev => ({ ...prev, [contact.phone]: 'sent' }))
         await loadData()
+
+        // Auto long break every N messages to simulate human behaviour
+        if (breakEnabled && sentThisSession > 0 && sentThisSession % breakEvery === 0) {
+          const pauseMs = breakDuration * 60 * 1000
+          setSuccess(`Anti-ban break: pausing ${breakDuration} min after ${sentThisSession} messages...`)
+          await new Promise(r => setTimeout(r, pauseMs))
+          if (!isSendingRef.current) break
+          setSuccess(null)
+        }
+
       } catch (e: any) {
         console.error(e)
         setContactStatuses(prev => ({ ...prev, [contact.phone]: 'failed' }))
-        setError(`Failed to send to ${contact.phone}: ${e?.message || 'Unknown error'}`)
+        setError(`Failed: ${e?.message || 'Unknown error'}`)
         await new Promise(r => setTimeout(r, 3000))
         setError(null)
       }
-      const delayMs = (minDelay + Math.random() * (maxDelay - minDelay)) * 1000
+
+      if (!isSendingRef.current) break
+
+      // Smart random delay — occasionally add a longer "human" pause
+      const base = minDelay + Math.random() * (maxDelay - minDelay)
+      const extraPause = Math.random() < 0.1 ? (30 + Math.random() * 60) : 0 // 10% chance of +30-90s pause
+      const delayMs = (base + extraPause) * 1000
       await new Promise(r => setTimeout(r, delayMs))
     }
     setIsSending(false)
     isSendingRef.current = false
+    setSimState('idle')
+    setSimTypedText('')
   }
 
   return (
@@ -547,35 +589,46 @@ function App() {
                           {isSendingQuick ? '...' : 'SEND'}
                         </button>
                      </div>
-                     {/* Delay controls */}
-                     <div className="flex items-center gap-1.5 mt-1 shrink-0">
-                       <span className="text-[7px] font-black text-gray-400 uppercase tracking-wider">Delay:</span>
-                       <input
-                         type="number"
-                         value={minDelay}
-                         onChange={e => setMinDelay(Math.max(5, Number(e.target.value)))}
-                         disabled={isSending}
-                         className="w-10 border rounded px-1 py-0.5 text-[8px] font-bold text-center outline-none focus:border-[#00A884] disabled:opacity-40"
-                         title="Min delay (seconds)"
-                       />
-                       <span className="text-[7px] text-gray-300">–</span>
-                       <input
-                         type="number"
-                         value={maxDelay}
-                         onChange={e => setMaxDelay(Math.max(minDelay + 1, Number(e.target.value)))}
-                         disabled={isSending}
-                         className="w-10 border rounded px-1 py-0.5 text-[8px] font-bold text-center outline-none focus:border-[#00A884] disabled:opacity-40"
-                         title="Max delay (seconds)"
-                       />
-                       <span className="text-[7px] text-gray-400">sec</span>
-                       <div className="flex gap-0.5 ml-auto">
-                         {[['Safe','90','180'],['Normal','45','120'],['Fast','20','45']].map(([label, mn, mx]) => (
-                           <button key={label} onClick={() => { setMinDelay(Number(mn)); setMaxDelay(Number(mx)) }}
-                             disabled={isSending}
-                             className={`px-1 py-0.5 rounded text-[6px] font-black uppercase tracking-wider transition-colors disabled:opacity-40 ${minDelay === Number(mn) && maxDelay === Number(mx) ? 'bg-[#00A884] text-white' : 'bg-gray-100 text-gray-400 hover:bg-gray-200'}`}>
-                             {label}
-                           </button>
-                         ))}
+                     {/* Anti-ban controls */}
+                     <div className="mt-1 shrink-0 space-y-1">
+                       {/* Delay row */}
+                       <div className="flex items-center gap-1.5">
+                         <span className="text-[7px] font-black text-gray-400 uppercase tracking-wider w-8">Delay</span>
+                         <input type="number" value={minDelay} onChange={e => setMinDelay(Math.max(5, Number(e.target.value)))} disabled={isSending}
+                           className="w-10 border rounded px-1 py-0.5 text-[8px] font-bold text-center outline-none focus:border-[#00A884] disabled:opacity-40" title="Min delay (sec)" />
+                         <span className="text-[7px] text-gray-300">–</span>
+                         <input type="number" value={maxDelay} onChange={e => setMaxDelay(Math.max(minDelay + 1, Number(e.target.value)))} disabled={isSending}
+                           className="w-10 border rounded px-1 py-0.5 text-[8px] font-bold text-center outline-none focus:border-[#00A884] disabled:opacity-40" title="Max delay (sec)" />
+                         <span className="text-[7px] text-gray-400">sec</span>
+                         <div className="flex gap-0.5 ml-auto">
+                           {[['Safe','90','180'],['Normal','45','120'],['Fast','20','45']].map(([label, mn, mx]) => (
+                             <button key={label} onClick={() => { setMinDelay(Number(mn)); setMaxDelay(Number(mx)) }} disabled={isSending}
+                               className={`px-1 py-0.5 rounded text-[6px] font-black uppercase tracking-wider transition-colors disabled:opacity-40 ${minDelay === Number(mn) && maxDelay === Number(mx) ? 'bg-[#00A884] text-white' : 'bg-gray-100 text-gray-400 hover:bg-gray-200'}`}>
+                               {label}
+                             </button>
+                           ))}
+                         </div>
+                       </div>
+                       {/* Daily limit + break row */}
+                       <div className="flex items-center gap-1.5">
+                         <span className="text-[7px] font-black text-gray-400 uppercase tracking-wider w-8">Limit</span>
+                         <input type="number" value={dailyLimit} onChange={e => setDailyLimit(Math.max(10, Number(e.target.value)))} disabled={isSending}
+                           className="w-12 border rounded px-1 py-0.5 text-[8px] font-bold text-center outline-none focus:border-[#00A884] disabled:opacity-40" title="Max sends per account per day" />
+                         <span className="text-[7px] text-gray-400">/day</span>
+                         <div className="w-px h-3 bg-gray-200 mx-0.5" />
+                         <button onClick={() => setBreakEnabled(v => !v)} disabled={isSending}
+                           className={`flex items-center gap-0.5 px-1 py-0.5 rounded text-[7px] font-black uppercase tracking-wider transition-colors disabled:opacity-40 ${breakEnabled ? 'bg-orange-100 text-orange-500' : 'bg-gray-100 text-gray-400'}`}>
+                           ☕ BREAK {breakEnabled ? 'ON' : 'OFF'}
+                         </button>
+                         {breakEnabled && <>
+                           <span className="text-[7px] text-gray-400">every</span>
+                           <input type="number" value={breakEvery} onChange={e => setBreakEvery(Math.max(5, Number(e.target.value)))} disabled={isSending}
+                             className="w-8 border rounded px-1 py-0.5 text-[8px] font-bold text-center outline-none focus:border-[#00A884] disabled:opacity-40" />
+                           <span className="text-[7px] text-gray-400">msgs,</span>
+                           <input type="number" value={breakDuration} onChange={e => setBreakDuration(Math.max(1, Number(e.target.value)))} disabled={isSending}
+                             className="w-8 border rounded px-1 py-0.5 text-[8px] font-bold text-center outline-none focus:border-[#00A884] disabled:opacity-40" />
+                           <span className="text-[7px] text-gray-400">min</span>
+                         </>}
                        </div>
                      </div>
                      <div className="mt-1 flex items-center justify-between shrink-0">
@@ -915,6 +968,20 @@ function App() {
                                {s.dailySent > 0 && <span className="text-[7px] text-gray-400 ml-auto">{s.dailySent} sent today</span>}
                              </div>
                            )}
+                           {/* Proxy input */}
+                           <div className="flex items-center gap-1 mt-1">
+                             <span className="text-[6px] font-black text-gray-400 uppercase">Proxy</span>
+                             <input
+                               type="text"
+                               defaultValue={s.proxy || ''}
+                               placeholder="http://user:pass@host:port or socks5://host:port (leave blank = direct)"
+                               className="flex-1 p-0.5 border rounded text-[7px] font-mono outline-none focus:border-[#00A884] bg-white"
+                               onBlur={async (e) => {
+                                 const val = e.target.value.trim()
+                                 await (window as any).api?.setAccountProxy(acc.id, val)
+                               }}
+                             />
+                           </div>
                          </div>
                        )
                      })}

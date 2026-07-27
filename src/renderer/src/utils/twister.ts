@@ -1,7 +1,7 @@
 import { synonymMap } from './synonyms';
 
 /**
- * Parses Spin-Tax format: {word1|word2|word3}
+ * Spin-Tax: {word1|word2|word3}
  */
 export function applySpinTax(text: string): string {
   return text.replace(/\{([^{}]+)\}/g, (_, match) => {
@@ -12,14 +12,13 @@ export function applySpinTax(text: string): string {
 }
 
 /**
- * Adds invisible unicode variation selectors randomly to make each message unique at byte level
+ * Invisible unicode chars — make each message unique at byte level
  */
 function addInvisibleVariation(text: string): string {
   const invisibles = ['\u200B', '\u200C', '\u200D', '\uFEFF']
   const words = text.split(' ')
   return words.map((word, i) => {
-    // Randomly insert invisible char after some words
-    if (i > 0 && Math.random() < 0.2) {
+    if (i > 0 && Math.random() < 0.25) {
       return invisibles[Math.floor(Math.random() * invisibles.length)] + word
     }
     return word
@@ -27,19 +26,53 @@ function addInvisibleVariation(text: string): string {
 }
 
 /**
- * Randomly varies punctuation and spacing slightly
+ * Vary punctuation and spacing
  */
 function varyPunctuation(text: string): string {
   return text
     .replace(/\.\.\./g, () => Math.random() > 0.5 ? '…' : '...')
-    .replace(/!/g, () => Math.random() > 0.7 ? '!!' : '!')
+    .replace(/!/g, () => {
+      const r = Math.random()
+      return r > 0.7 ? '!!' : r > 0.4 ? '!' : '.'
+    })
     .replace(/,\s/g, () => Math.random() > 0.5 ? ', ' : ',  ')
+    .replace(/\. /g, () => Math.random() > 0.7 ? '.  ' : '. ')
 }
 
 /**
- * Replaces random words with synonyms and adds subtle variations
+ * Random filler phrases appended or prepended
  */
-export function twistMessage(text: string, frequency: number = 0.3): string {
+const FILLERS_START = [
+  '', '', '', // mostly no filler
+  'Hey, ', 'Hi, ', 'Hello, ', 'Greetings, ', 'Good day, ',
+]
+const FILLERS_END = [
+  '', '', '', '',
+  ' 😊', ' 👋', ' ✅', ' 🙏', ' 💯',
+  '\nHave a great day!', '\nLooking forward to hearing from you.',
+  '\nFeel free to reply anytime.', '\nTake care!',
+]
+
+function addFillers(text: string): string {
+  const start = FILLERS_START[Math.floor(Math.random() * FILLERS_START.length)]
+  const end = FILLERS_END[Math.floor(Math.random() * FILLERS_END.length)]
+  // Only add start filler if message doesn't already start with greeting
+  const hasGreeting = /^(hey|hi|hello|good|dear|greet)/i.test(text.trim())
+  return `${hasGreeting ? '' : start}${text}${end}`
+}
+
+/**
+ * Randomly vary line breaks in multi-line messages
+ */
+function varyLineBreaks(text: string): string {
+  if (!text.includes('\n')) return text
+  return text.replace(/\n/g, () => Math.random() > 0.4 ? '\n' : '\n\n')
+}
+
+/**
+ * Main twist function — replaces words with synonyms + all variations
+ */
+export function twistMessage(text: string, frequency: number = 0.35): string {
   const parts = text.split(/(\{.*?\})/g);
 
   const twistedParts = parts.map(part => {
@@ -61,6 +94,8 @@ export function twistMessage(text: string, frequency: number = 0.3): string {
 
   let result = applySpinTax(twistedParts.join(''))
   result = varyPunctuation(result)
+  result = varyLineBreaks(result)
+  result = addFillers(result)
   result = addInvisibleVariation(result)
   return result
 }

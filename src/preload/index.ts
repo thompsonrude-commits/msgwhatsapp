@@ -11,6 +11,7 @@ const api = {
   logoutAccount: (accountId: string) => ipcRenderer.invoke('account:logout', { accountId }),
   removeAccount: (accountId: string) => ipcRenderer.invoke('account:remove', { accountId }),
   updateAccountLimit: (accountId: string, limit: number) => ipcRenderer.invoke('account:update-limit', { accountId, limit }),
+  setAccountProxy: (accountId: string, proxy: string) => ipcRenderer.invoke('account:set-proxy', { accountId, proxy }),
 
   // ── WhatsApp (legacy single-account compat) ───────────────────────────────
   init: () => ipcRenderer.invoke('whatsapp:init'),

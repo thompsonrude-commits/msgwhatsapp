@@ -70,6 +70,7 @@ export interface AccountStatus {
   qrCode: string | null
   dailySent: number
   isActive: boolean
+  proxy?: string | null
 }
 
 export class WhatsAppAccount extends EventEmitter {
@@ -84,15 +85,22 @@ export class WhatsAppAccount extends EventEmitter {
   public phone: string | undefined
   public dailySent = 0
   public lastSentAt: Date | null = null
+  public proxy: string | null = null  // format: "http://user:pass@host:port" or "socks5://host:port"
 
-  constructor(accountId: string, label: string) {
+  constructor(accountId: string, label: string, proxy?: string) {
     super()
     this.accountId = accountId
     this.label = label
+    this.proxy = proxy || null
     this.createClient()
   }
 
+  setProxy(proxy: string | null) {
+    this.proxy = proxy
+  }
+
   private createClient() {
+    const proxyArgs = this.proxy ? [`--proxy-server=${this.proxy}`] : []
     this.client = new Client({
       authStrategy: new LocalAuth({ clientId: `wab-session-${this.accountId}` }),
       puppeteer: {
@@ -103,7 +111,8 @@ export class WhatsAppAccount extends EventEmitter {
           '--disable-accelerated-2d-canvas', '--no-first-run', '--disable-gpu',
           '--disable-extensions', '--disable-default-apps', '--mute-audio',
           '--no-default-browser-check', '--disable-features=site-per-process',
-          '--disable-site-isolation-trials'
+          '--disable-site-isolation-trials',
+          ...proxyArgs
         ],
       },
       webVersionCache: {
@@ -213,18 +222,24 @@ export class WhatsAppAccount extends EventEmitter {
     if (!this.isReady) throw new Error(`Account ${this.label} not ready`)
     const sanitized = number.replace(/\D/g, '')
     const final = sanitized.includes('@c.us') ? sanitized : `${sanitized}@c.us`
-    // Use direct sendMessage — getChatById is unreliable on newer WA Web versions
     const typingDuration = Math.min(Math.max(message.length * 50, 2000), 8000)
+
+    // Try typing indicator with a hard 5s timeout — skip silently if it hangs
     try {
-      const chat = await this.client.getChatById(final)
-      await chat.sendSeen()
-      await chat.sendStateTyping()
-      await new Promise(r => setTimeout(r, typingDuration))
-      await chat.clearState()
+      const chatResult = await Promise.race([
+        this.client.getChatById(final),
+        new Promise<null>((_, reject) => setTimeout(() => reject(new Error('timeout')), 5000))
+      ]) as any
+      if (chatResult) {
+        await chatResult.sendSeen().catch(() => {})
+        await chatResult.sendStateTyping().catch(() => {})
+        await new Promise(r => setTimeout(r, typingDuration))
+        await chatResult.clearState().catch(() => {})
+      }
     } catch (_) {
-      // Fallback: just wait the typing duration if chat fetch fails
       await new Promise(r => setTimeout(r, typingDuration))
     }
+
     await new Promise(r => setTimeout(r, 500 + Math.random() * 1000))
     await this.client.sendMessage(final, message)
     this.dailySent++
@@ -277,7 +292,8 @@ export class WhatsAppAccount extends EventEmitter {
       isReady: this.isReady,
       qrCode: this.qrCode,
       dailySent: this.dailySent,
-      isActive: this.isReady
+      isActive: this.isReady,
+      proxy: this.proxy
     }
   }
 
@@ -291,9 +307,9 @@ export class WhatsAppAccount extends EventEmitter {
 export class WhatsAppManager extends EventEmitter {
   private accounts = new Map<string, WhatsAppAccount>()
 
-  addAccount(accountId: string, label: string): WhatsAppAccount {
+  addAccount(accountId: string, label: string, proxy?: string): WhatsAppAccount {
     if (this.accounts.has(accountId)) return this.accounts.get(accountId)!
-    const account = new WhatsAppAccount(accountId, label)
+    const account = new WhatsAppAccount(accountId, label, proxy)
     this.wireEvents(account)
     this.accounts.set(accountId, account)
     return account
@@ -313,6 +329,16 @@ export class WhatsAppManager extends EventEmitter {
     if (account) {
       account.logout().catch(() => {})
       this.accounts.delete(accountId)
+    }
+  }
+
+  setAccountProxy(accountId: string, proxy: string | null) {
+    const account = this.accounts.get(accountId)
+    if (!account) return
+    account.setProxy(proxy)
+    // Restart client with new proxy if not currently sending
+    if (!account.isReady && !account.isInitializing) {
+      account['createClient']()
     }
   }
 
