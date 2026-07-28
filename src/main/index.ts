@@ -203,8 +203,8 @@ if (!isLock) {
     })
 
     ipcMain.handle('whatsapp:check-version', async () => {
-      const current = '2.3000.1043880044-alpha'
-      const latest = await (await import('./whatsapp/manager')).WhatsAppAccount.fetchLatestWaVersion()
+      const current = db.getWaVersion() || '2.3000.1043880044-alpha'
+      const latest = await WhatsAppAccount.fetchLatestWaVersion()
       return { current, latest: latest || current }
     })
 
@@ -224,48 +224,13 @@ if (!isLock) {
     ipcMain.handle('db:get-verified-contacts', () => db.getVerifiedContacts())
     ipcMain.handle('db:get-all-contacts-export', () => db.getAllContactsForExport())
     ipcMain.handle('db:increment-warmup-day', (_e, { accountId }) => db.incrementWarmupDay(accountId))
+    ipcMain.handle('db:get-stats', () => db.getStats())
 
     // ── WA version auto-update ────────────────────────────────────────────────
     ipcMain.handle('whatsapp:update-version', async (_e, { version }) => {
-      // Store new version preference — accounts will use it on next reconnect
       try { db.setWaVersion(version) } catch (_) {}
       return { success: true, version }
     })
-
-    // ── New feature IPC handlers ──────────────────────────────────────────────────
-    ipcMain.handle('whatsapp:send-vcard', async (_e, { phone, accountId, displayName, senderPhone }) => {
-      const account = accountId
-        ? whatsappManager.getAccount(accountId)
-        : whatsappManager.getNextAccount()
-      if (!account) throw new Error('No connected account')
-      await account.sendVCard(phone, displayName, senderPhone)
-      db.updateAccountDailySent(account.accountId, account.dailySent)
-    })
-
-    ipcMain.handle('whatsapp:send-broadcast', async (_e, { phones, message, accountId }) => {
-      const account = accountId
-        ? whatsappManager.getAccount(accountId)
-        : whatsappManager.getNextAccount()
-      if (!account) throw new Error('No connected account')
-      await account.sendBroadcast(phones, message)
-      db.updateAccountDailySent(account.accountId, account.dailySent)
-    })
-
-    ipcMain.handle('whatsapp:has-profile-pic', async (_e, { phone, accountId }) => {
-      const account = accountId
-        ? whatsappManager.getAccount(accountId)
-        : whatsappManager.getReadyAccounts()[0]
-      if (!account) throw new Error('No connected account')
-      return account.hasProfilePicture(phone)
-    })
-
-    ipcMain.handle('whatsapp:check-version', async () => {
-      const current = db.getWaVersion() || '2.3000.1043880044-alpha'
-      const latest = await WhatsAppAccount.fetchLatestWaVersion()
-      return { current, latest: latest || current }
-    })
-
-    ipcMain.handle('db:get-stats', () => db.getStats())
 
     ipcMain.handle('account:update-warmup', (_e, { accountId, enabled }) => {
       db.updateAccountWarmup(accountId, enabled)

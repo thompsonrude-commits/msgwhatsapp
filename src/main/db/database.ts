@@ -124,6 +124,8 @@ function runMigrations() {
   safeAdd('logs', 'account_id', 'TEXT')
   safeAdd('logs', 'name', 'TEXT')
   safeAdd('logs', 'message_sent', 'TEXT')
+  safeAdd('accounts', 'warmup_enabled', 'INTEGER DEFAULT 0')
+  safeAdd('accounts', 'warmup_day', 'INTEGER DEFAULT 1')
 }
 
 export function saveDatabase() {
@@ -427,15 +429,15 @@ export function getWarmupLimit(id: string): number {
 // ── Follow-up sequences ───────────────────────────────────────────────────────
 export function getFollowUpContacts(hoursAfter: number = 24): any[] {
   try {
-    return toRows(db.exec(
-      `SELECT c.* FROM contacts c
-       JOIN logs l ON l.phone = c.phone
-       WHERE l.status = 'sent'
-       AND c.status != 'replied'
+    const rows = toRows(db.exec(
+      `SELECT c.phone, c.name, c.extra_data, c.status FROM contacts c
+       WHERE c.status = 'sent'
        AND c.phone NOT IN (SELECT phone FROM blacklist)
-       AND l.timestamp <= datetime('now', '-${hoursAfter} hours')
-       GROUP BY c.phone`
-    )).map(r => ({ ...r, extra_data: (() => { try { return JSON.parse(r.extra_data || '{}') } catch { return {} } })() }))
+       AND c.phone NOT IN (SELECT DISTINCT phone FROM logs WHERE status = 'sent' AND timestamp >= datetime('now', ?))
+       GROUP BY c.phone`,
+      [`-${hoursAfter} hours`]
+    ))
+    return rows.map(r => ({ ...r, extra_data: (() => { try { return JSON.parse(r.extra_data || '{}') } catch { return {} } })() }))
   } catch { return [] }
 }
 
