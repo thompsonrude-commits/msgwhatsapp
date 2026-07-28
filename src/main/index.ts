@@ -77,6 +77,12 @@ if (!isLock) {
         const saved = db.getAccounts().find(a => a.id === accountId)
         account = whatsappManager.addAccount(accountId, saved?.label || accountId)
       }
+      // If already ready, no need to reinit
+      if (account.isReady) return Promise.resolve()
+      // If stuck initializing, restart fresh
+      if (account.isInitializing) {
+        account['isInitializing'] = false
+      }
       return account.initialize()
     })
 

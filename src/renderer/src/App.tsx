@@ -178,6 +178,8 @@ function App() {
   // 4. Handlers
   const handleConnectAccount = async (accountId: string) => {
     const api = (window as any).api; if (!api) return
+    // Switch to accounts tab so user can see the QR
+    setActiveTab('accounts')
     await api.initAccount(accountId)
   }
 

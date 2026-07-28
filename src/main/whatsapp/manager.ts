@@ -136,14 +136,6 @@ export class WhatsAppAccount extends EventEmitter {
       bypassCSP: true
     })
 
-    // Inject stealth scripts after page creation
-    this.client.on('loading_screen', async () => {
-      try {
-        const page = await (this.client as any).pupPage
-        if (page) await this.applyStealthPatches(page)
-      } catch (_) {}
-    })
-
     this.setupListeners()
   }
 
@@ -155,27 +147,6 @@ export class WhatsAppAccount extends EventEmitter {
       'Mozilla/5.0 (Windows NT 11.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36',
     ]
     return agents[Math.floor(Math.random() * agents.length)]
-  }
-
-  private async applyStealthPatches(page: any) {
-    await page.evaluateOnNewDocument(() => {
-      // Remove webdriver flag
-      Object.defineProperty(navigator, 'webdriver', { get: () => false })
-      // Mock plugins
-      Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] })
-      // Mock languages
-      Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] })
-      // Remove automation-related chrome properties
-      delete (window as any).cdc_adoQpoasnfa76pfcZLmcfl_Array
-      delete (window as any).cdc_adoQpoasnfa76pfcZLmcfl_Promise
-      delete (window as any).cdc_adoQpoasnfa76pfcZLmcfl_Symbol
-      // Spoof permissions
-      const originalQuery = window.navigator.permissions.query
-      window.navigator.permissions.query = (parameters: any) =>
-        parameters.name === 'notifications'
-          ? Promise.resolve({ state: Notification.permission } as PermissionStatus)
-          : originalQuery(parameters)
-    })
   }
 
   private setupListeners() {
