@@ -411,3 +411,73 @@ export function incrementWarmupDay(id: string) {
   db.run('UPDATE accounts SET warmup_day = warmup_day + 1 WHERE id = ?', [id])
   saveDatabase()
 }
+
+export function getWarmupLimit(id: string): number {
+  try {
+    const rows = toRows(db.exec('SELECT warmup_enabled, warmup_day, daily_limit FROM accounts WHERE id = ?', [id]))
+    if (!rows[0]) return 200
+    if (!rows[0].warmup_enabled) return rows[0].daily_limit || 200
+    // Warmup: start at 5, add 5 per day, cap at daily_limit
+    const day = rows[0].warmup_day || 1
+    const cap = rows[0].daily_limit || 200
+    return Math.min(day * 5, cap)
+  } catch { return 200 }
+}
+
+// ── Follow-up sequences ───────────────────────────────────────────────────────
+export function getFollowUpContacts(hoursAfter: number = 24): any[] {
+  try {
+    return toRows(db.exec(
+      `SELECT c.* FROM contacts c
+       JOIN logs l ON l.phone = c.phone
+       WHERE l.status = 'sent'
+       AND c.status != 'replied'
+       AND c.phone NOT IN (SELECT phone FROM blacklist)
+       AND l.timestamp <= datetime('now', '-${hoursAfter} hours')
+       GROUP BY c.phone`
+    )).map(r => ({ ...r, extra_data: (() => { try { return JSON.parse(r.extra_data || '{}') } catch { return {} } })() }))
+  } catch { return [] }
+}
+
+// ── Blacklist auto-update ─────────────────────────────────────────────────────
+export function getFailCount(phone: string): number {
+  try {
+    const res = toRows(db.exec("SELECT COUNT(*) as c FROM logs WHERE phone = ? AND status = 'failed'", [phone]))
+    return res[0]?.c || 0
+  } catch { return 0 }
+}
+
+export function autoBlacklistIfNeeded(phone: string, threshold = 3) {
+  if (getFailCount(phone) >= threshold) {
+    addToBlacklist([phone], 'auto-failed')
+    return true
+  }
+  return false
+}
+
+// ── Scheduled campaigns ───────────────────────────────────────────────────────
+export function getScheduledCampaigns() {
+  try {
+    return toRows(db.exec(
+      "SELECT * FROM campaigns WHERE status = 'scheduled' AND scheduled_at <= datetime('now') ORDER BY scheduled_at ASC"
+    ))
+  } catch { return [] }
+}
+
+// ── Contact tags ──────────────────────────────────────────────────────────────
+export function setContactTag(phone: string, tag: string) {
+  try { db.run('UPDATE contacts SET status = ? WHERE phone = ?', [tag, phone]); saveDatabase() } catch (_) {}
+}
+
+// ── Export verified contacts ──────────────────────────────────────────────────
+export function getVerifiedContacts() {
+  return toRows(db.exec(
+    "SELECT phone, name, extra_data, status, verified_at FROM contacts WHERE is_whatsapp = 1 ORDER BY added_at DESC"
+  )).map(r => ({ ...r, extra_data: (() => { try { return JSON.parse(r.extra_data || '{}') } catch { return {} } })() }))
+}
+
+export function getAllContactsForExport() {
+  return toRows(db.exec(
+    "SELECT phone, name, extra_data, status, is_whatsapp, verified_at, added_at FROM contacts ORDER BY added_at DESC"
+  )).map(r => ({ ...r, extra_data: (() => { try { return JSON.parse(r.extra_data || '{}') } catch { return {} } })() }))
+}

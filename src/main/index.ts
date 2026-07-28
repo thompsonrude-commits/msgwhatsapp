@@ -216,6 +216,22 @@ if (!isLock) {
       db.updateAccountWarmup(accountId, enabled)
     })
 
+    // ── Extended features ─────────────────────────────────────────────────────
+    ipcMain.handle('db:get-warmup-limit', (_e, { accountId }) => db.getWarmupLimit(accountId))
+    ipcMain.handle('db:get-followup-contacts', (_e, { hours }) => db.getFollowUpContacts(hours || 24))
+    ipcMain.handle('db:auto-blacklist', (_e, { phone, threshold }) => db.autoBlacklistIfNeeded(phone, threshold || 3))
+    ipcMain.handle('db:set-contact-tag', (_e, { phone, tag }) => db.setContactTag(phone, tag))
+    ipcMain.handle('db:get-verified-contacts', () => db.getVerifiedContacts())
+    ipcMain.handle('db:get-all-contacts-export', () => db.getAllContactsForExport())
+    ipcMain.handle('db:increment-warmup-day', (_e, { accountId }) => db.incrementWarmupDay(accountId))
+
+    // ── WA version auto-update ────────────────────────────────────────────────
+    ipcMain.handle('whatsapp:update-version', async (_e, { version }) => {
+      // Store new version preference — accounts will use it on next reconnect
+      try { db.setWaVersion(version) } catch (_) {}
+      return { success: true, version }
+    })
+
     // ── New feature IPC handlers ──────────────────────────────────────────────────
     ipcMain.handle('whatsapp:send-vcard', async (_e, { phone, accountId, displayName, senderPhone }) => {
       const account = accountId

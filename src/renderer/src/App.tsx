@@ -45,6 +45,14 @@ function App() {
   const [checkingWaVersion, setCheckingWaVersion] = useState(false)
   // Reply count
   const [replyCount, setReplyCount] = useState(0)
+  // Follow-up
+  const [isSendingFollowUp, setIsSendingFollowUp] = useState(false)
+  // Schedule
+  const [scheduleTime, setScheduleTime] = useState('')
+  const [scheduledTimer, setScheduledTimer] = useState<ReturnType<typeof setTimeout> | null>(null)
+  // Campaign templates
+  const [templateName, setTemplateName] = useState('')
+  const [templates, setTemplates] = useState<any[]>([])
   const [contacts, setContacts] = useState<any[]>([])
   const [extractionResults, setExtractionResults] = useState<any[]>([])
   const [logs, setLogs] = useState<any[]>([])
@@ -78,8 +86,10 @@ function App() {
     try {
       const c = await api.getContacts()
       const l = await api.getLogs()
+      const t = await api.getTemplates()
       setContacts(c || [])
       setLogs(l || [])
+      setTemplates(t || [])
       const lic = await api.checkLicense()
       setLicense(lic)
       const s = await api.getStats()
@@ -220,6 +230,66 @@ function App() {
     await loadData()
     setSuccess(`Filtered: ${filtered.length}/${contacts.length} have profile pictures`)
     setIsFilteringPics(false)
+  }
+
+  const exportContactsCSV = async (verifiedOnly = false) => {
+    const api = (window as any).api; if (!api) return
+    const rows = verifiedOnly ? await api.getVerifiedContacts() : await api.getAllContactsExport()
+    if (!rows?.length) { setError('No contacts to export'); return }
+    const allKeys = new Set<string>(['phone','name','status','is_whatsapp','verified_at'])
+    rows.forEach((r: any) => { if (r.extra_data) Object.keys(r.extra_data).forEach((k: string) => allKeys.add(k)) })
+    const headers = Array.from(allKeys)
+    const csv = [headers.join(','), ...rows.map((r: any) => headers.map(h => {
+      const val = (h in r) ? r[h] : r.extra_data?.[h] ?? ''
+      return `"${String(val ?? '').replace(/"/g, '""')}"`
+    }).join(','))].join('\n')
+    const blob = new Blob([csv], { type: 'text/csv' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a'); a.href = url
+    a.download = verifiedOnly ? 'verified-contacts.csv' : 'all-contacts.csv'
+    a.click(); URL.revokeObjectURL(url)
+    setSuccess(`Exported ${rows.length} contacts`)
+  }
+
+  const handleSendFollowUp = async () => {
+    const api = (window as any).api
+    const ready = readyAccounts()
+    if (!api || ready.length === 0) { setError('Connect WhatsApp first'); return }
+    const followUps = await api.getFollowUpContacts(24)
+    if (!followUps?.length) { setSuccess('No follow-up contacts yet — need 24h after first DM'); return }
+    setIsSendingFollowUp(true)
+    let sent = 0
+    for (const c of followUps) {
+      try {
+        let msg = messageTemplate || 'Hi {name}, just following up!'
+        msg = msg.replace('{name}', c.name || '')
+        const acc = ready[sent % ready.length]
+        await api.sendMessage({ phone: c.phone, message: msg, accountId: acc.accountId })
+        sent++
+        await new Promise(r => setTimeout(r, (45 + Math.random() * 75) * 1000))
+      } catch (_) {}
+    }
+    setSuccess(`Follow-up sent to ${sent} contacts`)
+    setIsSendingFollowUp(false)
+    await loadData()
+  }
+
+  const handleSaveTemplate = async () => {
+    const api = (window as any).api; if (!api) return
+    if (!templateName.trim() || !messageTemplate.trim()) { setError('Enter template name and message'); return }
+    await api.saveTemplate(templateName.trim(), messageTemplate)
+    setTemplateName(''); setSuccess('Template saved'); await loadData()
+  }
+
+  const handleScheduleCampaign = () => {
+    if (!scheduleTime) { setError('Set a schedule time'); return }
+    const target = new Date(scheduleTime)
+    const ms = target.getTime() - Date.now()
+    if (ms <= 0) { setError('Schedule time must be in the future'); return }
+    if (scheduledTimer) clearTimeout(scheduledTimer)
+    const t = setTimeout(() => handleStartCampaign(), ms)
+    setScheduledTimer(t)
+    setSuccess(`Campaign scheduled for ${target.toLocaleTimeString()}`)
   }
 
 
@@ -606,6 +676,8 @@ function App() {
         const errMsg = e?.message || 'Unknown error'
         setFeedEntries(prev => [{phone: String(contact.phone), status: 'failed' as const, message: errMsg.slice(0,80), time: new Date()}, ...prev].slice(0,200))
         setError(`Failed: ${errMsg}`)
+        // Auto-blacklist if failed 3+ times
+        try { await api.autoBlacklist(contact.phone, 3) } catch (_) {}
         await new Promise(r => setTimeout(r, 3000))
         setError(null)
       }
@@ -629,6 +701,8 @@ function App() {
               <div className="px-1.5 py-0.5 rounded-full flex items-center gap-1 bg-white/20 text-white font-black text-[7px] uppercase">
                 <div className="w-1 h-1 rounded-full bg-[#25D366]" />
                 {readyAccounts().length} LIVE
+                {stats?.totalSentToday > 0 && <span className="ml-1 opacity-70">· {stats.totalSentToday} sent</span>}
+                {replyCount > 0 && <span className="ml-1 opacity-70">· {replyCount} replies</span>}
               </div>
             ) : (
               <>
@@ -802,6 +876,50 @@ function App() {
                         >
                            {isSending ? 'STOP' : 'SEND'}
                         </button>
+                     </div>
+                     {/* Schedule + Export + Follow-up + Templates row */}
+                     <div className="flex items-center gap-1 mt-1 shrink-0 flex-wrap">
+                       {/* Schedule */}
+                       <input type="datetime-local" value={scheduleTime} onChange={e => setScheduleTime(e.target.value)}
+                         className="border rounded px-1 py-0.5 text-[7px] font-bold outline-none focus:border-[#00A884]" />
+                       <button onClick={handleScheduleCampaign} disabled={!scheduleTime || isSending}
+                         className="px-1.5 py-0.5 bg-blue-50 border border-blue-200 text-blue-500 rounded text-[7px] font-black uppercase hover:bg-blue-100 disabled:opacity-40 transition-colors">
+                         ⏰ Schedule
+                       </button>
+                       {scheduledTimer && <span className="text-[6px] text-blue-400 font-black">Scheduled ✓</span>}
+                       <div className="w-px h-3 bg-gray-200" />
+                       {/* Follow-up */}
+                       <button onClick={handleSendFollowUp} disabled={isSendingFollowUp || !isAnyReady()}
+                         className="px-1.5 py-0.5 bg-orange-50 border border-orange-200 text-orange-500 rounded text-[7px] font-black uppercase hover:bg-orange-100 disabled:opacity-40 transition-colors">
+                         {isSendingFollowUp ? '...' : '↩ Follow-up'}
+                       </button>
+                       <div className="w-px h-3 bg-gray-200" />
+                       {/* Export */}
+                       <button onClick={() => exportContactsCSV(true)}
+                         className="px-1.5 py-0.5 bg-green-50 border border-green-200 text-green-500 rounded text-[7px] font-black uppercase hover:bg-green-100 transition-colors">
+                         ↓ Verified CSV
+                       </button>
+                       <button onClick={() => exportContactsCSV(false)}
+                         className="px-1.5 py-0.5 bg-gray-50 border border-gray-200 text-gray-500 rounded text-[7px] font-black uppercase hover:bg-gray-100 transition-colors">
+                         ↓ All CSV
+                       </button>
+                     </div>
+                     {/* Template save/load row */}
+                     <div className="flex items-center gap-1 mt-1 shrink-0">
+                       <input value={templateName} onChange={e => setTemplateName(e.target.value)}
+                         placeholder="Template name..." onKeyDown={e => e.key === 'Enter' && handleSaveTemplate()}
+                         className="flex-1 border rounded px-1 py-0.5 text-[7px] font-bold outline-none focus:border-[#00A884]" />
+                       <button onClick={handleSaveTemplate} disabled={!templateName.trim() || !messageTemplate.trim()}
+                         className="px-1.5 py-0.5 bg-[#00A884] text-white rounded text-[7px] font-black uppercase disabled:opacity-40 hover:bg-[#009272] transition-colors">
+                         💾 Save
+                       </button>
+                       {templates.length > 0 && (
+                         <select onChange={e => { const t = templates.find(x => String(x.id) === e.target.value); if (t) setMessageTemplate(t.message) }}
+                           className="border rounded px-1 py-0.5 text-[7px] font-bold outline-none focus:border-[#00A884] max-w-[100px]" defaultValue="">
+                           <option value="">Load template</option>
+                           {templates.map((t: any) => <option key={t.id} value={t.id}>{t.name}</option>)}
+                         </select>
+                       )}
                      </div>
                      {/* Import verification progress bar */}
                      {isImportVerifying && importProgress && (
@@ -1127,6 +1245,16 @@ function App() {
                                }}
                              />
                            </div>
+                           {/* Warmup toggle */}
+                           <div className="flex items-center gap-1 mt-1">
+                             <button onClick={async () => {
+                               const cur = s.warmup_enabled || false
+                               await (window as any).api?.setAccountWarmup(acc.id, !cur)
+                               await loadAccounts()
+                             }} className={`flex items-center gap-0.5 px-1 py-0.5 rounded text-[6px] font-black uppercase transition-colors ${s.warmup_enabled ? 'bg-orange-100 text-orange-500' : 'bg-gray-100 text-gray-400'}`}>
+                               🔥 Warmup {s.warmup_enabled ? `ON (Day ${s.warmup_day || 1} — ${Math.min((s.warmup_day||1)*5, s.daily_limit||200)}/day)` : 'OFF'}
+                             </button>
+                           </div>
                          </div>
                        )
                      })}
@@ -1226,6 +1354,14 @@ function App() {
                      <RefreshCw className={`w-2.5 h-2.5 ${checkingWaVersion ? 'animate-spin' : ''}`} />
                      {checkingWaVersion ? 'Checking...' : 'Check'}
                    </button>
+                   {waVersionInfo && waVersionInfo.latest !== waVersionInfo.current && (
+                     <button onClick={async () => {
+                       await (window as any).api?.updateWaVersion(waVersionInfo.latest)
+                       setSuccess(`Updated to ${waVersionInfo.latest} — reconnect WhatsApp to apply`)
+                     }} className="px-2 py-1 bg-orange-400 text-white rounded font-black text-[7px] uppercase active:scale-95 transition-all">
+                       Update
+                     </button>
+                   )}
                  </div>
                </section>
              )}

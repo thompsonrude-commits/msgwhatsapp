@@ -86,6 +86,19 @@ const api = {
   },
   updateAccountWarmup: (accountId: string, enabled: boolean) =>
     ipcRenderer.invoke('account:update-warmup', { accountId, enabled }),
+
+  // ── Extended features ──────────────────────────────────────────────────────
+  setAccountWarmup: (accountId: string, enabled: boolean) =>
+    ipcRenderer.invoke('account:set-warmup', { accountId, enabled }),
+  getWarmupLimit: (accountId: string) => ipcRenderer.invoke('db:get-warmup-limit', { accountId }),
+  getFollowUpContacts: (hours?: number) => ipcRenderer.invoke('db:get-followup-contacts', { hours }),
+  autoBlacklist: (phone: string, threshold?: number) => ipcRenderer.invoke('db:auto-blacklist', { phone, threshold }),
+  setContactTag: (phone: string, tag: string) => ipcRenderer.invoke('db:set-contact-tag', { phone, tag }),
+  getVerifiedContacts: () => ipcRenderer.invoke('db:get-verified-contacts'),
+  getAllContactsExport: () => ipcRenderer.invoke('db:get-all-contacts-export'),
+  incrementWarmupDay: (accountId: string) => ipcRenderer.invoke('db:increment-warmup-day', { accountId }),
+  updateWaVersion: (version: string) => ipcRenderer.invoke('whatsapp:update-version', { version }),
+  markReplied: (phone: string) => ipcRenderer.invoke('db:mark-replied', { phone }),
 }
 
 if (process.contextIsolated) {
