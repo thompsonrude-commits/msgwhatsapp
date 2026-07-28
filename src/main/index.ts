@@ -3,7 +3,7 @@ import { join } from 'path'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset'
 
-import { whatsappManager } from './whatsapp/manager'
+import { whatsappManager, WhatsAppAccount } from './whatsapp/manager'
 import * as db from './db/database'
 import { checkLicense, activateKey } from './license'
 
@@ -179,6 +179,82 @@ if (!isLock) {
     ipcMain.handle('db:delete-template', (_e, id) => db.deleteTemplate(id))
     ipcMain.handle('db:get-unsubscribes', () => db.getUnsubscribes())
 
+    // ── New feature IPC ──────────────────────────────────────────────────────────
+    ipcMain.handle('db:get-stats', () => db.getStats())
+
+    ipcMain.handle('whatsapp:send-vcard', async (_e, { phone, accountId, displayName, senderPhone }) => {
+      const account = accountId ? whatsappManager.getAccount(accountId) : whatsappManager.getNextAccount()
+      if (!account) throw new Error('No connected account')
+      await account.sendVCard(phone, displayName, senderPhone)
+      db.updateAccountDailySent(account.accountId, account.dailySent)
+    })
+
+    ipcMain.handle('whatsapp:send-broadcast', async (_e, { phones, message, accountId }) => {
+      const account = accountId ? whatsappManager.getAccount(accountId) : whatsappManager.getNextAccount()
+      if (!account) throw new Error('No connected account')
+      await account.sendBroadcast(phones, message)
+      db.updateAccountDailySent(account.accountId, account.dailySent)
+    })
+
+    ipcMain.handle('whatsapp:has-profile-pic', async (_e, { phone, accountId }) => {
+      const account = accountId ? whatsappManager.getAccount(accountId) : whatsappManager.getReadyAccounts()[0]
+      if (!account) return false
+      return account.hasProfilePicture(phone)
+    })
+
+    ipcMain.handle('whatsapp:check-version', async () => {
+      const current = '2.3000.1043880044-alpha'
+      const latest = await (await import('./whatsapp/manager')).WhatsAppAccount.fetchLatestWaVersion()
+      return { current, latest: latest || current }
+    })
+
+    ipcMain.handle('db:mark-replied', (_e, { phone }) => {
+      db.markContactReplied(phone)
+    })
+
+    ipcMain.handle('account:set-warmup', (_e, { accountId, enabled }) => {
+      db.updateAccountWarmup(accountId, enabled)
+    })
+
+    // ── New feature IPC handlers ──────────────────────────────────────────────────
+    ipcMain.handle('whatsapp:send-vcard', async (_e, { phone, accountId, displayName, senderPhone }) => {
+      const account = accountId
+        ? whatsappManager.getAccount(accountId)
+        : whatsappManager.getNextAccount()
+      if (!account) throw new Error('No connected account')
+      await account.sendVCard(phone, displayName, senderPhone)
+      db.updateAccountDailySent(account.accountId, account.dailySent)
+    })
+
+    ipcMain.handle('whatsapp:send-broadcast', async (_e, { phones, message, accountId }) => {
+      const account = accountId
+        ? whatsappManager.getAccount(accountId)
+        : whatsappManager.getNextAccount()
+      if (!account) throw new Error('No connected account')
+      await account.sendBroadcast(phones, message)
+      db.updateAccountDailySent(account.accountId, account.dailySent)
+    })
+
+    ipcMain.handle('whatsapp:has-profile-pic', async (_e, { phone, accountId }) => {
+      const account = accountId
+        ? whatsappManager.getAccount(accountId)
+        : whatsappManager.getReadyAccounts()[0]
+      if (!account) throw new Error('No connected account')
+      return account.hasProfilePicture(phone)
+    })
+
+    ipcMain.handle('whatsapp:check-version', async () => {
+      const current = db.getWaVersion() || '2.3000.1043880044-alpha'
+      const latest = await WhatsAppAccount.fetchLatestWaVersion()
+      return { current, latest: latest || current }
+    })
+
+    ipcMain.handle('db:get-stats', () => db.getStats())
+
+    ipcMain.handle('account:update-warmup', (_e, { accountId, enabled }) => {
+      db.updateAccountWarmup(accountId, enabled)
+    })
+
     // ── License IPC ──────────────────────────────────────────────────────────────
     ipcMain.handle('license:check', () => checkLicense())
     ipcMain.handle('license:activate', (_e, key) => activateKey(key))
@@ -201,6 +277,14 @@ if (!isLock) {
     whatsappManager.on('account:unsubscribe', (accountId, phone, keyword) => {
       db.addUnsubscribe(phone, accountId, keyword)
       mainWindow?.webContents.send('whatsapp:event', { type: 'unsubscribe', accountId, data: { phone, keyword } })
+    })
+    whatsappManager.on('account:message', (accountId, phone, body) => {
+      db.markContactReplied(phone)
+      mainWindow?.webContents.send('whatsapp:event', { type: 'message', accountId, data: { phone, body } })
+    })
+    whatsappManager.on('account:message', (accountId, phone, body) => {
+      db.markContactReplied(phone)
+      mainWindow?.webContents.send('message:received', { accountId, phone, body, timestamp: Date.now() })
     })
 
     app.on('activate', () => {

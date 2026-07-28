@@ -351,3 +351,63 @@ export function addUnsubscribe(phone: string, accountId: string, keyword: string
 export function getUnsubscribes() {
   return toRows(db.exec('SELECT * FROM unsubscribes ORDER BY timestamp DESC'))
 }
+
+// ── Stats ──────────────────────────────────────────────────────────────────
+export function getStats() {
+  const today = new Date().toISOString().slice(0, 10)
+  const totalSentToday = (() => {
+    try {
+      const res = toRows(db.exec(
+        "SELECT COUNT(*) as c FROM logs WHERE status = 'sent' AND date(timestamp) = date('now')"
+      ))
+      return res[0]?.c || 0
+    } catch { return 0 }
+  })()
+  const totalReplied = (() => {
+    try {
+      const res = toRows(db.exec("SELECT COUNT(*) as c FROM contacts WHERE status = 'replied'"))
+      return res[0]?.c || 0
+    } catch { return 0 }
+  })()
+  const totalSent = (() => {
+    try {
+      const res = toRows(db.exec("SELECT COUNT(*) as c FROM logs WHERE status = 'sent'"))
+      return res[0]?.c || 0
+    } catch { return 0 }
+  })()
+  const totalAll = (() => {
+    try {
+      const res = toRows(db.exec('SELECT COUNT(*) as c FROM logs'))
+      return res[0]?.c || 0
+    } catch { return 0 }
+  })()
+  const deliveryRate = totalAll > 0 ? Math.round((totalSent / totalAll) * 100) : 0
+  const accountStats = (() => {
+    try {
+      return toRows(db.exec('SELECT id, label, phone, daily_sent, daily_limit, warmup_enabled, warmup_day FROM accounts'))
+    } catch { return [] }
+  })()
+  // Messages per hour for the last 12 hours
+  const messagesPerHour: { hour: string; count: number }[] = []
+  for (let h = 11; h >= 0; h--) {
+    try {
+      const res = toRows(db.exec(
+        `SELECT COUNT(*) as c FROM logs WHERE status='sent' AND timestamp >= datetime('now', '-${h+1} hours') AND timestamp < datetime('now', '-${h} hours')`
+      ))
+      const label = new Date(Date.now() - h * 3600000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+      messagesPerHour.push({ hour: label, count: res[0]?.c || 0 })
+    } catch { messagesPerHour.push({ hour: `${h}h`, count: 0 }) }
+  }
+  return { totalSentToday, totalReplied, deliveryRate, accountStats, messagesPerHour, today }
+}
+
+// ── Warmup ──────────────────────────────────────────────────────────────────
+export function updateAccountWarmup(id: string, enabled: boolean) {
+  db.run('UPDATE accounts SET warmup_enabled = ? WHERE id = ?', [enabled ? 1 : 0, id])
+  saveDatabase()
+}
+
+export function incrementWarmupDay(id: string) {
+  db.run('UPDATE accounts SET warmup_day = warmup_day + 1 WHERE id = ?', [id])
+  saveDatabase()
+}

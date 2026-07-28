@@ -69,6 +69,23 @@ const api = {
 
   // ── Unsubscribes ──────────────────────────────────────────────────────────
   getUnsubscribes: () => ipcRenderer.invoke('db:get-unsubscribes'),
+
+  // ── New features ──────────────────────────────────────────────────────────
+  sendVCard: (data: { phone: string; accountId: string; displayName: string; senderPhone: string }) =>
+    ipcRenderer.invoke('whatsapp:send-vcard', data),
+  sendBroadcast: (data: { phones: string[]; message: string; accountId: string }) =>
+    ipcRenderer.invoke('whatsapp:send-broadcast', data),
+  hasProfilePicture: (phone: string, accountId: string) =>
+    ipcRenderer.invoke('whatsapp:has-profile-pic', { phone, accountId }),
+  checkWaVersion: () => ipcRenderer.invoke('whatsapp:check-version'),
+  getStats: () => ipcRenderer.invoke('db:get-stats'),
+  onMessageReceived: (callback: (data: any) => void) => {
+    const listener = (_event: any, data: any) => callback(data)
+    ipcRenderer.on('message:received', listener)
+    return () => ipcRenderer.removeListener('message:received', listener)
+  },
+  updateAccountWarmup: (accountId: string, enabled: boolean) =>
+    ipcRenderer.invoke('account:update-warmup', { accountId, enabled }),
 }
 
 if (process.contextIsolated) {

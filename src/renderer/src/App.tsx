@@ -34,6 +34,17 @@ function App() {
   const [accountStatuses, setAccountStatuses] = useState<Record<string, any>>({})
   const [newAccountLabel, setNewAccountLabel] = useState('')
   const [addingAccount, setAddingAccount] = useState(false)
+  // Campaign mode
+  const [campaignMode, setCampaignMode] = useState<'dm'|'vcard'|'broadcast'>('dm')
+  const [filterProfilePic, _setFilterProfilePic] = useState(false)
+  const [isFilteringPics, setIsFilteringPics] = useState(false)
+  // Dashboard stats
+  const [stats, setStats] = useState<any>(null)
+  // WA version
+  const [waVersionInfo, setWaVersionInfo] = useState<{current: string, latest: string} | null>(null)
+  const [checkingWaVersion, setCheckingWaVersion] = useState(false)
+  // Reply count
+  const [replyCount, setReplyCount] = useState(0)
   const [contacts, setContacts] = useState<any[]>([])
   const [extractionResults, setExtractionResults] = useState<any[]>([])
   const [logs, setLogs] = useState<any[]>([])
@@ -71,6 +82,9 @@ function App() {
       setLogs(l || [])
       const lic = await api.checkLicense()
       setLicense(lic)
+      const s = await api.getStats()
+      setStats(s)
+      setReplyCount(s?.totalReplied || 0)
     } catch (e) { console.error('Data Load Fail') }
   }
 
@@ -110,6 +124,7 @@ function App() {
 
     // Per-account real-time events
     let cleanup = () => {}
+    let cleanupMsg = () => {}
     if (api && typeof api.onWhatsAppEvent === 'function') {
       cleanup = api.onWhatsAppEvent((event: any) => {
         const { type, accountId, data } = event
@@ -125,11 +140,24 @@ function App() {
           setError(`WhatsApp Error: ${data}`)
         } else if (type === 'unsubscribe') {
           setSuccess(`Auto-unsubscribed: +${data?.phone || data}`)
+        } else if (type === 'message') {
+          setReplyCount(prev => prev + 1)
         }
       })
     }
+    if (api && typeof api.onMessageReceived === 'function') {
+      cleanupMsg = api.onMessageReceived((_data: any) => {
+        setReplyCount(c => c + 1)
+      })
+    }
 
-    return () => { clearInterval(timer); clearInterval(licTimer); cleanup() }
+    // Load dashboard stats every 10s
+    const statsTimer = setInterval(async () => {
+      if (api) { const s = await api.getStats?.(); if (s) setStats(s) }
+    }, 10000)
+    if (api) api.getStats?.().then((s: any) => { if (s) setStats(s) })
+
+    return () => { clearInterval(timer); clearInterval(licTimer); clearInterval(statsTimer); cleanup(); cleanupMsg() }
   }, [])
 
   useEffect(() => {
@@ -163,6 +191,35 @@ function App() {
     const api = (window as any).api; if (!api) return
     await api.removeAccount(accountId)
     await loadAccounts()
+  }
+
+  const handleCheckWaVersion = async () => {
+    const api = (window as any).api; if (!api) return
+    setCheckingWaVersion(true)
+    try {
+      const info = await api.checkWaVersion()
+      setWaVersionInfo(info)
+    } catch (_) { setError('Could not check WA version') }
+    setCheckingWaVersion(false)
+  }
+
+  const handleFilterByProfilePic = async () => {
+    const api = (window as any).api
+    if (!api || !isAnyReady()) { setError('Connect WhatsApp first'); return }
+    setIsFilteringPics(true)
+    setSuccess('Filtering contacts by profile picture...')
+    const filtered: any[] = []
+    for (const c of contacts) {
+      try {
+        const has = await api.hasProfilePicture(c.phone)
+        if (has) filtered.push(c)
+      } catch (_) { filtered.push(c) } // keep on error
+    }
+    await api.clearContacts()
+    if (filtered.length > 0) await api.addContacts(filtered)
+    await loadData()
+    setSuccess(`Filtered: ${filtered.length}/${contacts.length} have profile pictures`)
+    setIsFilteringPics(false)
   }
 
 
@@ -243,6 +300,11 @@ function App() {
       const lines = text.split('\n');
       const api = (window as any).api;
       if (!api) return;
+
+      // Extract CSV headers for mail merge preview
+      const firstLine = lines[0] || ''
+      const headers = firstLine.split(',').map(h => h.trim()).filter(h => h && !/^\d/.test(h))
+      if (headers.length > 1) { /* mail merge columns: headers */ }
       
       const parsed: any[] = [];
       lines.forEach((line, i) => {
@@ -251,7 +313,10 @@ function App() {
         phone = phone.replace(/\D/g, ''); // Extract only digits
         
         if (phone.length > 5) {
-          parsed.push({ phone, name: parts[1]?.trim() || `Imported ${i+1}` });
+          // Build extra_data from additional columns
+          const extra: Record<string, string> = {}
+          headers.forEach((h, idx) => { if (idx > 0 && parts[idx]) extra[h] = parts[idx].trim() })
+          parsed.push({ phone, name: parts[1]?.trim() || `Imported ${i+1}`, extra_data: extra });
         }
       });
       
@@ -398,22 +463,45 @@ function App() {
     const ready = readyAccounts()
     if (!api || ready.length === 0) { setError('Connect at least one WhatsApp account'); return; }
     if (contacts.length === 0) { setError('No leads'); return; }
+
+    // ── Broadcast mode ────────────────────────────────────────────────────────
+    if (campaignMode === 'broadcast') {
+      setIsSending(true); isSendingRef.current = true
+      const phones = contacts.map(c => c.phone)
+      const chunks: string[][] = []
+      for (let i = 0; i < phones.length; i += 256) chunks.push(phones.slice(i, i + 256))
+      let sent = 0
+      for (const chunk of chunks) {
+        if (!isSendingRef.current) break
+        try {
+          const target = ready[sent % ready.length]
+          let msg = messageTemplate
+          if (isSmartTwistEnabled) msg = twistMessage(msg, 0.35)
+          await api.sendBroadcast({ phones: chunk, message: msg, accountId: target.accountId })
+          sent += chunk.length
+          setFeedEntries(prev => [{phone: `Broadcast (${chunk.length})`, status: 'sent' as const, message: msg.slice(0,60), time: new Date()}, ...prev].slice(0,200))
+          const delayMs = (minDelay + Math.random() * (maxDelay - minDelay)) * 1000
+          await new Promise(r => setTimeout(r, delayMs))
+        } catch (e: any) {
+          setFeedEntries(prev => [{phone: `Broadcast chunk`, status: 'failed' as const, message: e?.message?.slice(0,60) || 'Error', time: new Date()}, ...prev].slice(0,200))
+        }
+      }
+      setSuccess(`Broadcast complete — ${sent} contacts`)
+      setIsSending(false); isSendingRef.current = false
+      return
+    }
+
     setIsSending(true)
     isSendingRef.current = true
-
     const initial: Record<string, 'pending' | 'sending' | 'sent' | 'failed'> = {}
     contacts.forEach(c => { initial[c.phone] = 'pending' })
     setContactStatuses(initial)
-
     let accountIndex = 0
     let sentThisSession = 0
-    // Track per-account daily sent counts locally
     const accountSentCount: Record<string, number> = {}
 
     for (const contact of contacts) {
       if (!isSendingRef.current) break;
-
-      // Get current ready accounts — wait for reconnect instead of stopping
       let currentReady = readyAccounts()
       if (currentReady.length === 0) {
         setSuccess('Accounts reconnecting — waiting up to 60s...')
@@ -426,102 +514,94 @@ function App() {
         }
         if (currentReady.length === 0) {
           setError('All accounts disconnected — campaign paused')
-          setIsSending(false)
-          isSendingRef.current = false
-          break
+          setIsSending(false); isSendingRef.current = false; break
         }
       }
-
-      // Find an account that hasn't hit daily limit
       let targetAccount: any = null
       for (let attempt = 0; attempt < currentReady.length; attempt++) {
         const candidate = currentReady[accountIndex % currentReady.length]
         accountIndex++
         const sent = accountSentCount[candidate.accountId] || candidate.dailySent || 0
-        if (sent < dailyLimit) {
-          targetAccount = candidate
-          break
-        }
+        if (sent < dailyLimit) { targetAccount = candidate; break }
       }
-
-      // All accounts hit daily limit
-      if (!targetAccount) {
-        setSuccess('Daily limit reached for all accounts. Pausing until tomorrow...')
-        break
-      }
+      if (!targetAccount) { setSuccess('Daily limit reached for all accounts.'); break }
 
       setContactStatuses(prev => ({ ...prev, [contact.phone]: 'sending' }))
       try {
-        let finalMessage = messageTemplate.replace('{name}', contact.name || '')
-        if (isSmartTwistEnabled) finalMessage = twistMessage(finalMessage, 0.35)
-
         setSimPhone(`${contact.phone} [${targetAccount.label || targetAccount.accountId}]`)
-        setSimState('typing')
-        setSimTypedText('')
-        const tMs = getTypingJitter(finalMessage.length)
-        const cMs = tMs / finalMessage.length
-        for (let ci = 0; ci <= finalMessage.length; ci++) {
-          if (!isSendingRef.current) break
-          await new Promise(r => setTimeout(r, cMs))
-          setSimTypedText(finalMessage.slice(0, ci))
-        }
-        setSimState('sending')
-        await new Promise(r => setTimeout(r, 600))
+        setSimState('typing'); setSimTypedText('')
 
-        // Retry up to 3 times on failure
-        let sendSuccess = false
-        let lastError: any = null
-        for (let attempt = 1; attempt <= 3; attempt++) {
-          try {
-            await api.sendMessage({ phone: contact.phone, message: finalMessage, accountId: targetAccount.accountId })
-            sendSuccess = true
-            break
-          } catch (sendErr: any) {
-            lastError = sendErr
-            const msg = (sendErr?.message || '').toLowerCase()
-            // If account disconnected — no point retrying, skip immediately
-            if (msg.includes('not ready') || msg.includes('disconnected') || msg.includes('session')) {
-              break
-            }
-            const isRateLimit = msg.includes('rate') || msg.includes('429') || msg.includes('too many') || msg.includes('erro') || msg.includes('timeout')
-            if (attempt < 3) {
-              const waitMs = isRateLimit ? 60000 * attempt : 10000 * attempt
-              setSuccess(`Retry ${attempt}/3 for ${contact.phone} — waiting ${waitMs/1000}s...`)
-              setFeedEntries(prev => [{phone: String(contact.phone), status: 'retry' as const, message: `Retry ${attempt}: ${(lastError?.message||'').slice(0,50)}`, time: new Date()}, ...prev].slice(0,200))
-              await new Promise(r => setTimeout(r, waitMs))
-              if (!isSendingRef.current) break
-              setSuccess(null)
-              // Refresh account status before retrying
-              await loadAccounts()
-              const stillReady = readyAccounts().find((a: any) => a.accountId === targetAccount.accountId)
-              if (!stillReady) break // account went offline, skip
+        // ── vCard mode ────────────────────────────────────────────────────────
+        if (campaignMode === 'vcard') {
+          await new Promise(r => setTimeout(r, 1500 + Math.random() * 1000))
+          setSimState('sending')
+          await api.sendVCard({
+            phone: contact.phone,
+            accountId: targetAccount.accountId,
+            displayName: targetAccount.label || 'TomWhats',
+            senderPhone: targetAccount.phone || ''
+          })
+        } else {
+          // ── DM mode ─────────────────────────────────────────────────────────
+          let finalMessage = messageTemplate.replace('{name}', contact.name || '')
+          // Apply mail merge from extra_data
+          if (contact.extra_data) {
+            Object.entries(contact.extra_data).forEach(([k, v]) => {
+              finalMessage = finalMessage.replace(new RegExp(`\\{${k}\\}`, 'gi'), String(v))
+            })
+          }
+          if (isSmartTwistEnabled) finalMessage = twistMessage(finalMessage, 0.35)
+          const tMs = getTypingJitter(finalMessage.length)
+          const cMs = tMs / finalMessage.length
+          for (let ci = 0; ci <= finalMessage.length; ci++) {
+            if (!isSendingRef.current) break
+            await new Promise(r => setTimeout(r, cMs))
+            setSimTypedText(finalMessage.slice(0, ci))
+          }
+          setSimState('sending')
+          await new Promise(r => setTimeout(r, 600))
+          let sendSuccess = false; let lastError: any = null
+          for (let attempt = 1; attempt <= 3; attempt++) {
+            try {
+              await api.sendMessage({ phone: contact.phone, message: finalMessage, accountId: targetAccount.accountId })
+              sendSuccess = true; break
+            } catch (sendErr: any) {
+              lastError = sendErr
+              const msg = (sendErr?.message || '').toLowerCase()
+              if (msg.includes('not ready') || msg.includes('disconnected') || msg.includes('session')) break
+              const isRateLimit = msg.includes('rate') || msg.includes('429') || msg.includes('too many') || msg.includes('erro') || msg.includes('timeout')
+              if (attempt < 3) {
+                const waitMs = isRateLimit ? 60000 * attempt : 10000 * attempt
+                setSuccess(`Retry ${attempt}/3 for ${contact.phone} — waiting ${waitMs/1000}s...`)
+                setFeedEntries(prev => [{phone: String(contact.phone), status: 'retry' as const, message: `Retry ${attempt}: ${(lastError?.message||'').slice(0,50)}`, time: new Date()}, ...prev].slice(0,200))
+                await new Promise(r => setTimeout(r, waitMs))
+                if (!isSendingRef.current) break
+                setSuccess(null)
+                await loadAccounts()
+                const stillReady = readyAccounts().find((a: any) => a.accountId === targetAccount.accountId)
+                if (!stillReady) break
+              }
             }
           }
+          if (!sendSuccess) throw lastError
+          setFeedEntries(prev => [{phone: String(contact.phone), status: 'sent' as const, message: finalMessage.slice(0,60), time: new Date()}, ...prev].slice(0,200))
         }
-
-        if (!sendSuccess) throw lastError
 
         accountSentCount[targetAccount.accountId] = (accountSentCount[targetAccount.accountId] || 0) + 1
         sentThisSession++
-        setFeedEntries(prev => [{phone: String(contact.phone), status: 'sent' as const, message: finalMessage.slice(0,60), time: new Date()}, ...prev].slice(0,200))
         setSimState('sent')
         await new Promise(r => setTimeout(r, 1500))
-        setSimState('idle')
-        setSimTypedText('')
+        setSimState('idle'); setSimTypedText('')
         setContactStatuses(prev => ({ ...prev, [contact.phone]: 'sent' }))
         await loadData()
 
-        // Auto long break every N messages to simulate human behaviour
         if (breakEnabled && sentThisSession > 0 && sentThisSession % breakEvery === 0) {
-          const pauseMs = breakDuration * 60 * 1000
-          setSuccess(`Anti-ban break: pausing ${breakDuration} min after ${sentThisSession} messages...`)
-          await new Promise(r => setTimeout(r, pauseMs))
+          setSuccess(`Anti-ban break: pausing ${breakDuration} min...`)
+          await new Promise(r => setTimeout(r, breakDuration * 60 * 1000))
           if (!isSendingRef.current) break
           setSuccess(null)
         }
-
       } catch (e: any) {
-        console.error(e)
         setContactStatuses(prev => ({ ...prev, [contact.phone]: 'failed' }))
         const errMsg = e?.message || 'Unknown error'
         setFeedEntries(prev => [{phone: String(contact.phone), status: 'failed' as const, message: errMsg.slice(0,80), time: new Date()}, ...prev].slice(0,200))
@@ -529,19 +609,12 @@ function App() {
         await new Promise(r => setTimeout(r, 3000))
         setError(null)
       }
-
       if (!isSendingRef.current) break
-
-      // Smart random delay — occasionally add a longer "human" pause
       const base = minDelay + Math.random() * (maxDelay - minDelay)
-      const extraPause = Math.random() < 0.1 ? (30 + Math.random() * 60) : 0 // 10% chance of +30-90s pause
-      const delayMs = (base + extraPause) * 1000
-      await new Promise(r => setTimeout(r, delayMs))
+      const extraPause = Math.random() < 0.1 ? (30 + Math.random() * 60) : 0
+      await new Promise(r => setTimeout(r, (base + extraPause) * 1000))
     }
-    setIsSending(false)
-    isSendingRef.current = false
-    setSimState('idle')
-    setSimTypedText('')
+    setIsSending(false); isSendingRef.current = false; setSimState('idle'); setSimTypedText('')
   }
 
   return (
@@ -579,10 +652,14 @@ function App() {
         
         {/* Sidebar */}
         <aside className="w-8 bg-white border-r flex flex-col items-center py-2 gap-3 shrink-0 z-20">
-          <button onClick={() => setActiveTab('campaign')} className={`p-1 rounded ${activeTab === 'campaign' ? 'text-[#00A884] bg-[#F0F2F5]' : 'text-gray-300'}`}><LayoutDashboard className="w-4 h-4" /></button>
+          <button onClick={() => setActiveTab('campaign')} className={`p-1 rounded ${activeTab === 'campaign' ? 'text-[#00A884] bg-[#F0F2F5]' : 'text-gray-300'}`} title="Campaign"><LayoutDashboard className="w-4 h-4" /></button>
           <button onClick={() => setActiveTab('accounts')} title="Accounts" className={`p-1 rounded relative ${activeTab === 'accounts' ? 'text-[#00A884] bg-[#F0F2F5]' : 'text-gray-300'}`}>
             <Smartphone className="w-4 h-4" />
             {readyAccounts().length > 0 && <span className="absolute -top-0.5 -right-0.5 w-2 h-2 bg-[#25D366] rounded-full border border-white" />}
+          </button>
+          <button onClick={() => setActiveTab('dashboard')} title="Dashboard" className={`p-1 rounded relative ${activeTab === 'dashboard' ? 'text-[#00A884] bg-[#F0F2F5]' : 'text-gray-300'}`}>
+            <LayoutDashboard className="w-4 h-4" />
+            {replyCount > 0 && <span className="absolute -top-0.5 -right-0.5 w-3 h-3 bg-orange-400 rounded-full border border-white flex items-center justify-center text-[5px] text-white font-black">{replyCount > 9 ? '9+' : replyCount}</span>}
           </button>
           <button onClick={() => setActiveTab('generator')} className={`p-1 rounded ${activeTab === 'generator' ? 'text-[#00A884] bg-[#F0F2F5]' : 'text-gray-300'}`}><UserPlus className="w-4 h-4" /></button>
           <button onClick={() => setActiveTab('history')} className={`p-1 rounded ${activeTab === 'history' ? 'text-[#00A884] bg-[#F0F2F5]' : 'text-gray-300'}`}><History className="w-4 h-4" /></button>
@@ -603,6 +680,24 @@ function App() {
              {/* Dynamic Main View based on activeTab */}
              {activeTab === 'campaign' && (
                <section className="flex-1 flex flex-col gap-1.5 min-w-0 overflow-hidden">
+                  {/* Campaign Mode Selector */}
+                  <div className="bg-white rounded border px-1.5 py-1 shadow-sm shrink-0 flex items-center gap-1">
+                    <span className="text-[7px] font-black text-gray-400 uppercase tracking-wider">Mode:</span>
+                    {(['dm','vcard','broadcast'] as const).map(m => (
+                      <button key={m} onClick={() => setCampaignMode(m)} disabled={isSending}
+                        className={`px-1.5 py-0.5 rounded text-[7px] font-black uppercase tracking-wider transition-colors disabled:opacity-40 ${campaignMode === m ? 'bg-[#00A884] text-white' : 'bg-gray-100 text-gray-400 hover:bg-gray-200'}`}>
+                        {m === 'dm' ? '💬 DM' : m === 'vcard' ? '👤 vCard' : '📢 Broadcast'}
+                      </button>
+                    ))}
+                    <div className="w-px h-3 bg-gray-200 mx-0.5" />
+                    <button onClick={handleFilterByProfilePic} disabled={isSending || isFilteringPics || !isAnyReady()}
+                      title="Filter contacts to only those with profile pictures"
+                      className={`flex items-center gap-0.5 px-1 py-0.5 rounded text-[7px] font-black uppercase transition-colors disabled:opacity-40 ${filterProfilePic ? 'bg-blue-100 text-blue-500' : 'bg-gray-100 text-gray-400 hover:bg-gray-200'}`}>
+                      {isFilteringPics ? '...' : '🖼️ Filter Pics'}
+                    </button>
+                    {campaignMode === 'broadcast' && <span className="text-[6px] text-orange-400 font-black ml-auto">Max 256 per list • saved contacts only</span>}
+                    {campaignMode === 'vcard' && <span className="text-[6px] text-blue-400 font-black ml-auto">Sends your contact card — recipients can save you</span>}
+                  </div>
                   {/* Message Editor */}
                   <div className="bg-white rounded border p-1.5 flex flex-col shadow-sm" style={{height: '45%'}}>
                      <div className="flex justify-between items-center mb-1">
@@ -1057,6 +1152,84 @@ function App() {
                </section>
              )}
 
+             {activeTab === 'dashboard' && (
+               <section className="flex-1 flex flex-col gap-1.5 min-w-0 overflow-hidden p-0.5">
+                 {/* Stats cards */}
+                 <div className="grid grid-cols-2 gap-1 shrink-0">
+                   <div className="bg-white rounded border p-2 shadow-sm">
+                     <div className="text-[7px] font-black text-gray-400 uppercase tracking-wider">Sent Today</div>
+                     <div className="text-[22px] font-black text-[#00A884]">{stats?.totalSentToday || 0}</div>
+                   </div>
+                   <div className="bg-white rounded border p-2 shadow-sm">
+                     <div className="text-[7px] font-black text-gray-400 uppercase tracking-wider">Replies</div>
+                     <div className="text-[22px] font-black text-orange-400">{stats?.totalReplied || 0}</div>
+                   </div>
+                   <div className="bg-white rounded border p-2 shadow-sm">
+                     <div className="text-[7px] font-black text-gray-400 uppercase tracking-wider">Delivery Rate</div>
+                     <div className="text-[22px] font-black text-blue-400">{stats?.deliveryRate || 0}%</div>
+                   </div>
+                   <div className="bg-white rounded border p-2 shadow-sm">
+                     <div className="text-[7px] font-black text-gray-400 uppercase tracking-wider">Accounts Live</div>
+                     <div className="text-[22px] font-black text-[#25D366]">{readyAccounts().length}</div>
+                   </div>
+                 </div>
+                 {/* Messages per hour chart */}
+                 <div className="bg-white rounded border p-1.5 shadow-sm shrink-0">
+                   <div className="text-[7px] font-black text-gray-400 uppercase tracking-wider mb-1">Messages / Hour (last 12h)</div>
+                   <div className="flex items-end gap-0.5 h-12">
+                     {(stats?.messagesPerHour || []).map((h: any, i: number) => {
+                       const max = Math.max(...(stats?.messagesPerHour || []).map((x: any) => x.count), 1)
+                       const pct = Math.round((h.count / max) * 100)
+                       return (
+                         <div key={i} className="flex-1 flex flex-col items-center gap-0.5">
+                           <div className="w-full bg-[#00A884] rounded-t" style={{height: `${Math.max(pct, 2)}%`}} title={`${h.count} msgs`} />
+                           <span className="text-[5px] text-gray-300 font-black">{h.hour.split(':')[0]}</span>
+                         </div>
+                       )
+                     })}
+                   </div>
+                 </div>
+                 {/* Account stats */}
+                 <div className="bg-white rounded border flex-1 overflow-hidden shadow-sm">
+                   <div className="px-1.5 py-1 border-b bg-[#F0F2F5] text-[7px] font-black text-gray-500 uppercase tracking-widest">Account Stats</div>
+                   <div className="overflow-y-auto flex-1 custom-scroll">
+                     {(stats?.accountStats || []).map((a: any) => (
+                       <div key={a.id} className="flex items-center gap-1.5 px-2 py-1 border-b last:border-0">
+                         <div className={`w-1.5 h-1.5 rounded-full ${accountStatuses[a.id]?.isReady ? 'bg-[#25D366]' : 'bg-gray-300'}`} />
+                         <span className="text-[8px] font-black text-gray-600 flex-1">{a.label}</span>
+                         <span className="text-[7px] text-gray-400">{a.daily_sent}/{a.daily_limit} today</span>
+                         <div className="w-12 bg-gray-100 rounded-full h-1">
+                           <div className="bg-[#00A884] h-1 rounded-full" style={{width: `${Math.min((a.daily_sent/Math.max(a.daily_limit,1))*100,100)}%`}} />
+                         </div>
+                       </div>
+                     ))}
+                   </div>
+                 </div>
+                 {/* WA Version check */}
+                 <div className="bg-white rounded border p-1.5 shadow-sm shrink-0 flex items-center gap-2">
+                   <div className="flex-1">
+                     <div className="text-[7px] font-black text-gray-400 uppercase">WhatsApp Web Version</div>
+                     {waVersionInfo && (
+                       <div className="text-[7px] text-gray-500 mt-0.5">
+                         Current: <span className="font-black text-gray-600">{waVersionInfo.current.slice(0,20)}</span>
+                         {waVersionInfo.latest !== waVersionInfo.current && (
+                           <span className="ml-1 text-orange-400 font-black">→ Update available: {waVersionInfo.latest.slice(0,20)}</span>
+                         )}
+                         {waVersionInfo.latest === waVersionInfo.current && (
+                           <span className="ml-1 text-[#25D366] font-black">✓ Up to date</span>
+                         )}
+                       </div>
+                     )}
+                   </div>
+                   <button onClick={handleCheckWaVersion} disabled={checkingWaVersion}
+                     className="px-2 py-1 bg-[#00A884] text-white rounded font-black text-[7px] uppercase disabled:opacity-40 active:scale-95 transition-all flex items-center gap-0.5">
+                     <RefreshCw className={`w-2.5 h-2.5 ${checkingWaVersion ? 'animate-spin' : ''}`} />
+                     {checkingWaVersion ? 'Checking...' : 'Check'}
+                   </button>
+                 </div>
+               </section>
+             )}
+
              {activeTab === 'generator' && (
                <section className="flex-1 flex flex-col gap-1.5 min-w-0 overflow-hidden">
                   {/* Controls */}
@@ -1273,3 +1446,4 @@ function App() {
 }
 
 export default App
+

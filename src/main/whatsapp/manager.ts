@@ -228,6 +228,9 @@ export class WhatsAppAccount extends EventEmitter {
         const phone = msg.from.replace('@c.us', '')
         this.emit('unsubscribe', this.accountId, phone, msg.body)
       }
+      // Emit incoming message for reply detection
+      const senderPhone = msg.from.replace('@c.us', '').replace(/\D/g, '')
+      this.emit('message', this.accountId, senderPhone, msg.body)
     })
   }
 
@@ -447,6 +450,7 @@ export class WhatsAppManager extends EventEmitter {
     account.on('disconnected', (id, reason) => this.emit('account:disconnected', id, reason))
     account.on('error', (id, err) => this.emit('account:error', id, err))
     account.on('unsubscribe', (id, phone, keyword) => this.emit('account:unsubscribe', id, phone, keyword))
+    account.on('message', (id, phone, body) => this.emit('account:message', id, phone, body))
   }
 
   removeAccount(accountId: string) {
