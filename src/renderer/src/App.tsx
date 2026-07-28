@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, Component, ReactNode } from 'react'
 import { 
   MessageCircle, 
   History,
@@ -15,6 +15,20 @@ import {
   RefreshCw
 } from 'lucide-react'
 import { twistMessage, getTypingJitter } from './utils/twister'
+
+// Error boundary to prevent white screen
+export class ErrorBoundary extends Component<{children: ReactNode}, {error: string|null}> {
+  constructor(props: any) { super(props); this.state = { error: null } }
+  static getDerivedStateFromError(e: any) { return { error: e?.message || String(e) } }
+  render() {
+    if (this.state.error) return (
+      <div style={{padding:20,fontFamily:'monospace',fontSize:12,color:'red',background:'#fff',height:'100vh'}}>
+        <b>App Error — please restart</b><br/><br/>{this.state.error}
+      </div>
+    )
+    return this.props.children
+  }
+}
 
 const AppLogo = () => (
   <div className="flex items-center gap-1">
@@ -49,7 +63,8 @@ function App() {
   const [isSendingFollowUp, setIsSendingFollowUp] = useState(false)
   // Schedule
   const [scheduleTime, setScheduleTime] = useState('')
-  const [scheduledTimer, setScheduledTimer] = useState<ReturnType<typeof setTimeout> | null>(null)
+  const scheduledTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const [scheduledSet, setScheduledSet] = useState(false)
   // Campaign templates
   const [templateName, setTemplateName] = useState('')
   const [templates, setTemplates] = useState<any[]>([])
@@ -86,13 +101,13 @@ function App() {
     try {
       const c = await api.getContacts()
       const l = await api.getLogs()
-      const t = await api.getTemplates()
+      const t = api.getTemplates ? await api.getTemplates() : []
       setContacts(c || [])
       setLogs(l || [])
       setTemplates(t || [])
       const lic = await api.checkLicense()
       setLicense(lic)
-      const s = await api.getStats()
+      const s = api.getStats ? await api.getStats() : null
       setStats(s)
       setReplyCount(s?.totalReplied || 0)
     } catch (e) { console.error('Data Load Fail') }
@@ -288,9 +303,9 @@ function App() {
     const target = new Date(scheduleTime)
     const ms = target.getTime() - Date.now()
     if (ms <= 0) { setError('Schedule time must be in the future'); return }
-    if (scheduledTimer) clearTimeout(scheduledTimer)
+    if (scheduledTimerRef.current) clearTimeout(scheduledTimerRef.current)
     const t = setTimeout(() => handleStartCampaign(), ms)
-    setScheduledTimer(t)
+    scheduledTimerRef.current = t; setScheduledSet(true)
     setSuccess(`Campaign scheduled for ${target.toLocaleTimeString()}`)
   }
 
@@ -888,7 +903,7 @@ function App() {
                          className="px-1.5 py-0.5 bg-blue-50 border border-blue-200 text-blue-500 rounded text-[7px] font-black uppercase hover:bg-blue-100 disabled:opacity-40 transition-colors">
                          ⏰ Schedule
                        </button>
-                       {scheduledTimer && <span className="text-[6px] text-blue-400 font-black">Scheduled ✓</span>}
+                       {scheduledSet && <span className="text-[6px] text-blue-400 font-black">Scheduled ✓</span>}
                        <div className="w-px h-3 bg-gray-200" />
                        {/* Follow-up */}
                        <button onClick={handleSendFollowUp} disabled={isSendingFollowUp || !isAnyReady()}
@@ -1584,4 +1599,5 @@ function App() {
 }
 
 export default App
+
 
