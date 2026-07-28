@@ -224,7 +224,6 @@ if (!isLock) {
     ipcMain.handle('db:get-verified-contacts', () => db.getVerifiedContacts())
     ipcMain.handle('db:get-all-contacts-export', () => db.getAllContactsForExport())
     ipcMain.handle('db:increment-warmup-day', (_e, { accountId }) => db.incrementWarmupDay(accountId))
-    ipcMain.handle('db:get-stats', () => db.getStats())
 
     // ── WA version auto-update ────────────────────────────────────────────────
     ipcMain.handle('whatsapp:update-version', async (_e, { version }) => {

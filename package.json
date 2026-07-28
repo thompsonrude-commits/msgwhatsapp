@@ -1,7 +1,7 @@
 {
   "name": "tomwhatsbulk-sender",
   "productName": "TomWhatsBulk Sender",
-  "version": "1.1.4",
+  "version": "1.1.5",
   "description": "TomWhatsBulk Sender - Professional WhatsApp Bulk Automation",
   "main": "./out/main/index.js",
   "author": "TomXtractor",
